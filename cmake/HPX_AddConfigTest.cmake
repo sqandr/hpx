@@ -1,225 +1,535 @@
 # Copyright (c) 2011 Bryce Lelbach
+# Copyright (c) 2014 Thomas Heller
+# Copyright (c) 2017 Denis Blank
+# Copyright (c) 2017 Google
+# Copyright (c) 2017 Taeguk Kwon
+# Copyright (c) 2020 Giannis Gonidelis
 #
+# SPDX-License-Identifier: BSL-1.0
 # Distributed under the Boost Software License, Version 1.0. (See accompanying
 # file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 set(HPX_ADDCONFIGTEST_LOADED TRUE)
 
-include(HPX_Include)
+include(CheckLibraryExists)
 
-hpx_include(Message
-            Compile
-            GetIncludeDirectory
-            ParseArguments)
+function(add_hpx_config_test variable)
+  set(options FILE EXECUTE)
+  set(one_value_args SOURCE ROOT CMAKECXXFEATURE)
+  set(multi_value_args
+      INCLUDE_DIRECTORIES
+      LINK_DIRECTORIES
+      COMPILE_DEFINITIONS
+      LIBRARIES
+      ARGS
+      DEFINITIONS
+      REQUIRED
+  )
+  cmake_parse_arguments(
+    ${variable} "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN}
+  )
 
-macro(add_hpx_config_test name variable)
-  hpx_parse_arguments(${name} "SOURCE;FLAGS;DEFINITIONS;LANGUAGE;ARGS;ROOT"
-                              "FILE" ${ARGN})
+  set(_run_msg)
+  # Check CMake feature tests if the user didn't override the value of this
+  # variable:
+  if(NOT DEFINED ${variable})
+    if(${variable}_CMAKECXXFEATURE)
+      # We don't have to run our own feature test if there is a corresponding
+      # cmake feature test and cmake reports the feature is supported on this
+      # platform.
+      list(FIND CMAKE_CXX_COMPILE_FEATURES ${${variable}_CMAKECXXFEATURE} __pos)
+      if(NOT ${__pos} EQUAL -1)
+        set(${variable}
+            TRUE
+            CACHE INTERNAL ""
+        )
+        set(_run_msg "Success (cmake feature test)")
+      endif()
+    endif()
+  endif()
 
-  if("${variable}" STREQUAL "ON")
-    hpx_debug("config_test.${name}" "${variable} is currently set to ON, test will not be performed.")
-    set(${variable} ON CACHE STRING "${name} state.")
-    foreach(definition ${${name}_DEFINITIONS})
-      add_definitions(-D${definition})
-    endforeach()
-  elseif("${variable}" STREQUAL "OFF")
-    hpx_debug("config_test.${name}" "${variable} is currently set to OFF, test will not be performed.")
-    set(${variable} OFF CACHE STRING "${name} state.")
-  else()
-    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/config_tests)
+  if(NOT DEFINED ${variable})
+    file(MAKE_DIRECTORY
+         "${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/config_tests"
+    )
 
-    set(test_source "")
-
-    if(${name}_FILE)
-      if(${name}_ROOT)
-        set(test_source "${${name}_ROOT}/share/hpx-${HPX_VERSION}/${${name}_SOURCE}")
+    string(TOLOWER "${variable}" variable_lc)
+    if(${variable}_FILE)
+      if(${variable}_ROOT)
+        set(test_source "${${variable}_ROOT}/share/hpx/${${variable}_SOURCE}")
       else()
-        set(test_source "${hpx_SOURCE_DIR}/${${name}_SOURCE}")
+        set(test_source "${PROJECT_SOURCE_DIR}/${${variable}_SOURCE}")
       endif()
     else()
       set(test_source
-          "${CMAKE_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/config_tests/src.cpp")
-      file(WRITE "${CMAKE_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/config_tests/src.cpp"
-           "${${name}_SOURCE}\n")
+          "${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/config_tests/${variable_lc}.cpp"
+      )
+      file(WRITE "${test_source}" "${${variable}_SOURCE}\n")
     endif()
+    set(test_binary
+        ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/config_tests/${variable_lc}
+    )
 
-    hpx_debug("config_test.${name}" "Using ${test_source} as source file.")
-    hpx_print_list("DEBUG" "config_test.${name}" "Flags for config test" ${name}_FLAGS)
+    get_directory_property(CONFIG_TEST_INCLUDE_DIRS INCLUDE_DIRECTORIES)
+    get_directory_property(CONFIG_TEST_LINK_DIRS LINK_DIRECTORIES)
+    set(COMPILE_DEFINITIONS_TMP)
+    set(CONFIG_TEST_COMPILE_DEFINITIONS)
+    get_directory_property(COMPILE_DEFINITIONS_TMP COMPILE_DEFINITIONS)
+    foreach(def IN LISTS COMPILE_DEFINITIONS_TMP
+                         ${variable}_COMPILE_DEFINITIONS
+    )
+      set(CONFIG_TEST_COMPILE_DEFINITIONS
+          "${CONFIG_TEST_COMPILE_DEFINITIONS} -D${def}"
+      )
+    endforeach()
+    get_property(
+      HPX_TARGET_COMPILE_OPTIONS_PUBLIC_VAR GLOBAL
+      PROPERTY HPX_TARGET_COMPILE_OPTIONS_PUBLIC
+    )
+    get_property(
+      HPX_TARGET_COMPILE_OPTIONS_PRIVATE_VAR GLOBAL
+      PROPERTY HPX_TARGET_COMPILE_OPTIONS_PRIVATE
+    )
+    set(HPX_TARGET_COMPILE_OPTIONS_VAR
+        ${HPX_TARGET_COMPILE_OPTIONS_PUBLIC_VAR}
+        ${HPX_TARGET_COMPILE_OPTIONS_PRIVATE_VAR}
+    )
+    foreach(_flag ${HPX_TARGET_COMPILE_OPTIONS_VAR})
+      if(NOT "${_flag}" MATCHES "^\\$.*")
+        set(CONFIG_TEST_COMPILE_DEFINITIONS
+            "${CONFIG_TEST_COMPILE_DEFINITIONS} ${_flag}"
+        )
+      endif()
+    endforeach()
 
-    hpx_compile(${name} SOURCE ${test_source} LANGUAGE ${${name}_LANGUAGE}
-      OUTPUT ${CMAKE_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/config_tests/${name}
-      FLAGS ${${name}_FLAGS})
+    set(CONFIG_TEST_INCLUDE_DIRS ${CONFIG_TEST_INCLUDE_DIRS}
+                                 ${${variable}_INCLUDE_DIRECTORIES}
+    )
+    set(CONFIG_TEST_LINK_DIRS ${CONFIG_TEST_LINK_DIRS}
+                              ${${variable}_LINK_DIRECTORIES}
+    )
 
-    if("${${name}_RESULT}" STREQUAL "0")
-      set(test_result 0)
+    get_property(
+      _base_libraries
+      TARGET hpx_base_libraries
+      PROPERTY INTERFACE_LINK_LIBRARIES
+    )
+    set(CONFIG_TEST_LINK_LIBRARIES ${_base_libraries} ${${variable}_LIBRARIES})
 
-      execute_process(
-        COMMAND "${CMAKE_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/config_tests/${name}"
-                ${${name}_ARGS}
-        RESULT_VARIABLE test_result OUTPUT_QUIET ERROR_QUIET)
-
-      if("${test_result}" STREQUAL "0")
-        set(${variable} ON CACHE STRING "${name} state.")
-        hpx_info("config_test.${name}" "Test passed.")
-        foreach(definition ${${name}_DEFINITIONS})
-          add_definitions(-D${definition})
-        endforeach()
+    if(${variable}_EXECUTE)
+      if(NOT CMAKE_CROSSCOMPILING)
+        # cmake-format: off
+        try_run(
+          ${variable}_RUN_RESULT ${variable}_COMPILE_RESULT
+          ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/config_tests
+          ${test_source}
+          CMAKE_FLAGS
+            "-DINCLUDE_DIRECTORIES=${CONFIG_TEST_INCLUDE_DIRS}"
+            "-DLINK_DIRECTORIES=${CONFIG_TEST_LINK_DIRS}"
+            "-DLINK_LIBRARIES=${CONFIG_TEST_LINK_LIBRARIES}"
+            "-DCOMPILE_DEFINITIONS=${CONFIG_TEST_COMPILE_DEFINITIONS}"
+          CXX_STANDARD ${HPX_CXX_STANDARD}
+          CXX_STANDARD_REQUIRED ON
+          CXX_EXTENSIONS FALSE
+          RUN_OUTPUT_VARIABLE ${variable}_OUTPUT
+          ARGS ${${variable}_ARGS}
+        )
+        # cmake-format: on
+        if(${variable}_COMPILE_RESULT AND NOT ${variable}_RUN_RESULT)
+          set(${variable}_RESULT TRUE)
+        else()
+          set(${variable}_RESULT FALSE)
+        endif()
       else()
-        set(${variable} OFF CACHE STRING "${name} state.")
-        hpx_warn("config_test.${name}" "Test failed, returned ${test_result}.")
+        set(${variable}_RESULT FALSE)
       endif()
     else()
-      set(${variable} OFF CACHE STRING "${name} state.")
-      hpx_warn("config_test.${name}" "Test failed to compile.")
+      # cmake-format: off
+      try_compile(
+        ${variable}_RESULT
+        ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/config_tests
+        ${test_source}
+        CMAKE_FLAGS
+          "-DINCLUDE_DIRECTORIES=${CONFIG_TEST_INCLUDE_DIRS}"
+          "-DLINK_DIRECTORIES=${CONFIG_TEST_LINK_DIRS}"
+          "-DLINK_LIBRARIES=${CONFIG_TEST_LINK_LIBRARIES}"
+          "-DCOMPILE_DEFINITIONS=${CONFIG_TEST_COMPILE_DEFINITIONS}"
+        OUTPUT_VARIABLE ${variable}_OUTPUT
+        CXX_STANDARD ${HPX_CXX_STANDARD}
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS FALSE
+        COPY_FILE ${test_binary}
+      )
+      # cmake-format: on
+      hpx_debug("Compile test: ${variable}")
+      hpx_debug("Compilation output: ${${variable}_OUTPUT}")
+    endif()
+
+    set(_run_msg "Success")
+  else()
+    set(${variable}_RESULT ${${variable}})
+    if(NOT _run_msg)
+      set(_run_msg "pre-set to ${${variable}}")
     endif()
   endif()
-endmacro()
 
-###############################################################################
-macro(hpx_check_for_gnu_128bit_integers variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+  string(TOUPPER "${variable}" variable_uc)
+  set(_msg "Performing Test ${variable_uc}")
 
-  add_hpx_config_test("gnu_int128" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/gnu_128bit_integers.cpp
-    FLAGS ${boost_include_dir} ${include_dir} FILE ${ARGN})
-endmacro()
+  if(${variable}_RESULT)
+    set(_msg "${_msg} - ${_run_msg}")
+  else()
+    set(_msg "${_msg} - Failed")
+  endif()
 
-macro(hpx_check_for_gnu_aligned_16 variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+  set(${variable}
+      ${${variable}_RESULT}
+      CACHE INTERNAL ""
+  )
+  hpx_info(${_msg})
 
-  add_hpx_config_test("gnu_aligned_16" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/gnu_aligned_16.cpp
-    FLAGS ${boost_include_dir} ${include_dir} FILE ${ARGN})
-endmacro()
+  if(${variable}_RESULT)
+    foreach(definition ${${variable}_DEFINITIONS})
+      hpx_add_config_define(${definition})
+    endforeach()
+  elseif(${variable}_REQUIRED)
+    hpx_warn("Test failed, detailed output:\n\n${${variable}_OUTPUT}")
+    hpx_error(${${variable}_REQUIRED})
+  endif()
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_pthread_affinity_np variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# Makes it possible to provide a feature test that is able to test the compiler
+# to build parts of HPX directly when the given definition is defined.
+function(add_hpx_in_framework_config_test variable)
+  # Generate the config only if the test wasn't executed yet
+  if(NOT DEFINED ${variable})
+    # Location to generate the config headers to
+    set(${variable}_GENERATED_DIR
+        "${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/config_tests/header-${variable}"
+    )
+    generate_config_defines_header(${${variable}_GENERATED_DIR})
+  endif()
 
-  add_hpx_config_test("pthread_affinity_np" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/pthread_affinity_np.cpp
-    FLAGS -pthread ${boost_include_dir} ${include_dir} FILE ${ARGN})
-endmacro()
+  set(options)
+  set(one_value_args)
+  set(multi_value_args DEFINITIONS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS)
+  cmake_parse_arguments(
+    ${variable} "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN}
+  )
 
-###############################################################################
-macro(hpx_cpuid target variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+  # We call the generic feature test method while modifying some existing parsed
+  # arguments in order to alter the INCLUDE_DIRECTORIES and the
+  # COMPILE_DEFINITIONS. It's important here not to link the config test against
+  # an executable because otherwise this will result in unresolved references to
+  # the HPX library, that wasn't built as of now.
+  add_hpx_config_test(
+    ${variable} ${${variable}_UNPARSED_ARGUMENTS}
+    DEFINITIONS ${${variable}_DEFINITIONS}
+    COMPILE_DEFINITIONS
+      ${${variable}_COMPILE_DEFINITIONS}
+      # We add the definitions we test to the existing compile definitions.
+      ${${variable}_DEFINITIONS}
+      # Add HPX_NO_VERSION_CHECK to make header only parts of HPX available
+      # without requiring to link against the HPX sources. We can remove this
+      # workaround as soon as CMake 3.6 is the minimal required version and
+      # supports: CMAKE_TRY_COMPILE_TARGET_TYPE = STATIC_LIBRARY when using
+      # try_compile to not to throw errors on unresolved symbols.
+      HPX_NO_VERSION_CHECK
+    INCLUDE_DIRECTORIES
+      ${${variable}_INCLUDE_DIRECTORIES}
+      # We add the generated headers to the include dirs
+      ${${variable}_GENERATED_DIR}
+  )
 
-  add_hpx_config_test("${target}" ${variable} LANGUAGE CXX
+  if(DEFINED ${variable}_GENERATED_DIR)
+    # Cleanup the generated header
+    file(REMOVE_RECURSE "${${variable}_GENERATED_DIR}")
+  endif()
+endfunction()
+
+# ##############################################################################
+function(hpx_cpuid target variable)
+  add_hpx_config_test(
+    ${variable}
     SOURCE cmake/tests/cpuid.cpp
-    FLAGS ${boost_include_dir} ${include_dir}
-    FILE ARGS "${target}" ${ARGN})
-endmacro()
+    COMPILE_DEFINITIONS "${boost_include_dir}" "${include_dir}" FILE EXECUTE
+    ARGS "${target}" ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_rvalue_references variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_unistd_h)
+  add_hpx_config_test(
+    HPX_WITH_UNISTD_H SOURCE cmake/tests/unistd_h.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_rvalue_references" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_rvalue_references.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_libfun_std_experimental_optional)
+  add_hpx_config_test(
+    HPX_WITH_LIBFUN_EXPERIMENTAL_OPTIONAL
+    SOURCE cmake/tests/libfun_std_experimental_optional.cpp FILE ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_variadic_templates variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx11_std_atomic)
+  # Make sure HPX_HAVE_LIBATOMIC is removed from the cache if necessary
+  if(NOT HPX_WITH_CXX11_ATOMIC)
+    unset(HPX_HAVE_LIBATOMIC CACHE)
+  endif()
 
-  add_hpx_config_test("cxx11_variadic_templates" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_variadic_templates.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+  if(NOT MSVC)
+    # Sometimes linking against libatomic is required for atomic ops, if the
+    # platform doesn't support lock-free atomics. We know, it's not needed for
+    # MSVC
+    check_library_exists(atomic __atomic_fetch_add_4 "" HPX_HAVE_LIBATOMIC)
+    if(HPX_HAVE_LIBATOMIC)
+      set(HPX_CXX11_STD_ATOMIC_LIBRARIES
+          atomic
+          CACHE BOOL "std::atomics need separate library" FORCE
+      )
+    endif()
+  endif()
 
-###############################################################################
-macro(hpx_check_for_cxx11_lambdas variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+  add_hpx_config_test(
+    HPX_WITH_CXX11_ATOMIC
+    SOURCE cmake/tests/cxx11_std_atomic.cpp
+    LIBRARIES ${HPX_CXX11_STD_ATOMIC_LIBRARIES} FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_lambdas" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_lambdas.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# Separately check for 128 bit atomics
+function(hpx_check_for_cxx11_std_atomic_128bit)
+  add_hpx_config_test(
+    HPX_WITH_CXX11_ATOMIC_128BIT
+    SOURCE cmake/tests/cxx11_std_atomic_128bit.cpp
+    LIBRARIES ${HPX_CXX11_STD_ATOMIC_LIBRARIES} FILE ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_auto variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx11_std_shared_ptr_lwg3018)
+  add_hpx_config_test(
+    HPX_WITH_CXX11_SHARED_PTR_LWG3018
+    SOURCE cmake/tests/cxx11_std_shared_ptr_lwg3018.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_auto" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_auto.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx11_std_quick_exit)
+  add_hpx_config_test(
+    HPX_WITH_CXX11_STD_QUICK_EXIT SOURCE cmake/tests/cxx11_std_quick_exit.cpp
+                                         FILE ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_decltype variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_aligned_new)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_ALIGNED_NEW
+    SOURCE cmake/tests/cxx17_aligned_new.cpp FILE ${ARGN}
+    REQUIRED
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_decltype" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_decltype.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_filesystem)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_FILESYSTEM SOURCE cmake/tests/cxx17_filesystem.cpp FILE
+                                     ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_std_unique_ptr variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_fold_expressions)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_FOLD_EXPRESSIONS
+    SOURCE cmake/tests/cxx17_fold_expressions.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_std_unique_ptr" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_std_unique_ptr.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_fallthrough_attribute)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_FALLTHROUGH_ATTRIBUTE
+    SOURCE cmake/tests/cxx17_fallthrough_attribute.cpp FILE ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_std_tuple variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_nodiscard_attribute)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_NODISCARD_ATTRIBUTE
+    SOURCE cmake/tests/cxx17_nodiscard_attribute.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_std_tuple" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_std_tuple.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_hardware_destructive_interference_size)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_HARDWARE_DESTRUCTIVE_INTERFERENCE_SIZE
+    SOURCE cmake/tests/cxx17_hardware_destructive_interference_size.cpp FILE
+           ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_std_bind variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_std_in_place_type_t)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_STD_IN_PLACE_TYPE_T
+    SOURCE cmake/tests/cxx17_std_in_place_type_t.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_std_bind" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_std_bind.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_maybe_unused)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_MAYBE_UNUSED SOURCE cmake/tests/cxx17_maybe_unused.cpp FILE
+                                       ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_std_function variable)
-  hpx_get_include_directory(include_dir)
-  hpx_get_boost_include_directory(boost_include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_deduction_guides)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_DEDUCTION_GUIDES
+    SOURCE cmake/tests/cxx17_deduction_guides.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_std_function" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_std_function.cpp
-    FLAGS ${boost_include_dir} ${include_dir} "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_structured_bindings)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_STRUCTURED_BINDINGS
+    SOURCE cmake/tests/cxx17_structured_bindings.cpp FILE ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_cxx11_std_initializer_list variable)
-  hpx_get_include_directory(include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_if_constexpr)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_IF_CONSTEXPR SOURCE cmake/tests/cxx17_if_constexpr.cpp FILE
+                                       ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("cxx11_std_initializer_list" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/cxx11_std_initializer_list.cpp
-    FLAGS "-std=c++0x" FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_inline_constexpr_variable)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_INLINE_CONSTEXPR_VALUE
+    SOURCE cmake/tests/cxx17_inline_constexpr_variable.cpp FILE ${ARGN}
+  )
+endfunction()
 
-###############################################################################
-macro(hpx_check_for_thread_safe_hdf5 variable)
-  hpx_get_include_directory(include_dir)
+# ##############################################################################
+function(hpx_check_for_cxx17_noexcept_functions_as_nontype_template_arguments)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_NOEXCEPT_FUNCTIONS_AS_NONTYPE_TEMPLATE_ARGUMENTS
+    SOURCE cmake/tests/cxx17_noexcept_function.cpp FILE ${ARGN}
+  )
+endfunction()
 
-  add_hpx_config_test("hdf5_thread_safe" ${variable} LANGUAGE CXX
-    SOURCE cmake/tests/hdf5_thread_safe.cpp
-    FLAGS -I${HDF5_INCLUDE_DIR} ${include_dir} FILE ${ARGN})
-endmacro()
+# ##############################################################################
+function(hpx_check_for_cxx17_std_variant)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_STD_VARIANT SOURCE cmake/tests/cxx17_std_variant.cpp FILE
+                                      ${ARGN}
+  )
+endfunction()
 
+# ##############################################################################
+function(hpx_check_for_cxx17_std_transform_scan)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_STD_TRANSFORM_SCAN_ALGORITHMS
+    SOURCE cmake/tests/cxx17_std_transform_scan_algorithms.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_cxx17_std_scan)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_STD_SCAN_ALGORITHMS
+    SOURCE cmake/tests/cxx17_std_scan_algorithms.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_cxx17_shared_ptr_array)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_SHARED_PTR_ARRAY
+    SOURCE cmake/tests/cxx17_shared_ptr_array.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_cxx17_std_nontype_template_parameter_auto)
+  add_hpx_config_test(
+    HPX_WITH_CXX17_NONTYPE_TEMPLATE_PARAMETER_AUTO
+    SOURCE cmake/tests/cxx17_std_nontype_template_parameter_auto.cpp FILE
+           ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_cxx20_coroutines)
+  add_hpx_config_test(
+    HPX_WITH_CXX20_COROUTINES SOURCE cmake/tests/cxx20_coroutines.cpp FILE
+                                     ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_cxx20_std_disable_sized_sentinel_for)
+  add_hpx_config_test(
+    HPX_WITH_CXX20_STD_DISABLE_SIZED_SENTINEL_FOR
+    SOURCE cmake/tests/cxx20_std_disable_sized_sentinel_for.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_cxx20_no_unique_address_attribute)
+  add_hpx_config_test(
+    HPX_WITH_CXX20_NO_UNIQUE_ADDRESS_ATTRIBUTE
+    SOURCE cmake/tests/cxx20_no_unique_address_attribute.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_builtin_integer_pack)
+  add_hpx_config_test(
+    HPX_WITH_BUILTIN_INTEGER_PACK SOURCE cmake/tests/builtin_integer_pack.cpp
+                                         FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_builtin_make_integer_seq)
+  add_hpx_config_test(
+    HPX_WITH_BUILTIN_MAKE_INTEGER_SEQ
+    SOURCE cmake/tests/builtin_make_integer_seq.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_builtin_type_pack_element)
+  add_hpx_config_test(
+    HPX_WITH_BUILTIN_TYPE_PACK_ELEMENT
+    SOURCE cmake/tests/builtin_type_pack_element.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_mm_prefetch)
+  add_hpx_config_test(
+    HPX_WITH_MM_PREFETCH SOURCE cmake/tests/mm_prefetch.cpp FILE ${ARGN}
+  )
+endfunction()
+
+# ##############################################################################
+function(hpx_check_for_stable_inplace_merge)
+  add_hpx_config_test(
+    HPX_WITH_STABLE_INPLACE_MERGE SOURCE cmake/tests/stable_inplace_merge.cpp
+                                         FILE ${ARGN}
+  )
+endfunction()

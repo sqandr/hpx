@@ -1,75 +1,68 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c)      2011 Bryce Adelstein-Lelbach
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2020 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
-#if !defined(HPX_83DB815F_26D5_4525_AC5B_E702FBD886D4)
-#define HPX_83DB815F_26D5_4525_AC5B_E702FBD886D4
+#pragma once
 
-#include <boost/io/ios_state.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/serialization/split_member.hpp>
-#include <boost/serialization/version.hpp>
-#include <boost/serialization/tracking.hpp>
-
-#include <hpx/exception.hpp>
+#include <hpx/config.hpp>
 #include <hpx/runtime/components/component_type.hpp>
 #include <hpx/runtime/naming/name.hpp>
-#include <hpx/runtime/naming/locality.hpp>
-#include <hpx/util/safe_bool.hpp>
+#include <hpx/util/ios_flags_saver.hpp>
+#include <hpx/modules/errors.hpp>
+
+#include <cstdint>
 
 namespace hpx { namespace agas
 {
 
 struct gva
 {
-    typedef boost::int32_t component_type;
-    typedef boost::uint64_t lva_type;
+    typedef std::int32_t component_type;
+    typedef std::uint64_t lva_type;
 
     gva()
-      : endpoint(),
-        type(components::component_invalid),
+      : type(components::component_invalid),
         count(0),
         lva_(0),
         offset(0) {}
 
-    gva(naming::locality const& ep,
-        component_type t = components::component_invalid, boost::uint64_t c = 1,
-        lva_type a = 0, boost::uint64_t o = 0)
-      : endpoint(ep),
+    explicit gva(naming::gid_type const& p,
+        component_type t = components::component_invalid, std::uint64_t c = 1,
+        lva_type a = 0, std::uint64_t o = 0)
+      : prefix(p),
         type(t),
         count(c),
         lva_(a),
         offset(o) {}
 
-    gva(naming::locality const& ep, component_type t, boost::uint64_t c, void* a,
-        boost::uint64_t o = 0)
-      : endpoint(ep),
+    gva(naming::gid_type const& p, component_type t, std::uint64_t c, void* a,
+        std::uint64_t o = 0)
+      : prefix(p),
         type(t),
         count(c),
         lva_(reinterpret_cast<lva_type>(a)),
         offset(o) {}
 
-    gva(lva_type a)
-      : endpoint(),
-        type(components::component_invalid),
+    explicit gva(lva_type a)
+      : type(components::component_invalid),
         count(0),
         lva_(a),
         offset(0) {}
 
-    gva(void* a)
-      : endpoint(),
-        type(components::component_invalid),
+    explicit gva(void* a)
+      : type(components::component_invalid),
         count(0),
         lva_(reinterpret_cast<lva_type>(a)),
         offset(0) {}
 
     gva& operator=(lva_type a)
     {
-        endpoint = naming::locality();
+        prefix = naming::gid_type();
         type = components::component_invalid;
         count = 0;
         lva_ = a;
@@ -79,7 +72,7 @@ struct gva
 
     gva& operator=(void* a)
     {
-        endpoint = naming::locality();
+        prefix = naming::gid_type();
         type = components::component_invalid;
         count = 0;
         lva_ = reinterpret_cast<lva_type>(a);
@@ -87,23 +80,13 @@ struct gva
         return *this;
     }
 
-    gva& operator=(gva const& other)
-    {
-        endpoint = other.endpoint;
-        type = other.type;
-        count = other.count;
-        lva_ = other.lva_;
-        offset = other.offset;
-        return *this;
-    }
-
     bool operator==(gva const& rhs) const
     {
-        return type     == rhs.type
-            && count    == rhs.count
-            && lva_     == rhs.lva_
-            && offset   == rhs.offset
-            && endpoint == rhs.endpoint;
+        return type   == rhs.type
+            && count  == rhs.count
+            && lva_   == rhs.lva_
+            && offset == rhs.offset
+            && prefix == rhs.prefix;
     }
 
     bool operator!=(gva const& rhs) const
@@ -137,27 +120,26 @@ struct gva
         // This is a hack to make sure that if resolve() or lva() is called on
         // the returned GVA, an exact copy will be returned (see the last two
         // lines of lva() above.
-        g.offset = 0;
         g.count = 1;
         return g;
     }
 
-    naming::locality endpoint;
+    naming::gid_type prefix;
     component_type type;
-    boost::uint64_t count;
+    std::uint64_t count;
 
   private:
     lva_type lva_;
 
   public:
-    boost::uint64_t offset;
+    std::uint64_t offset;
 
   private:
-    friend class boost::serialization::access;
+    friend class hpx::serialization::access;
 
     template<class Archive>
-    void save(Archive& ar, const unsigned int version) const
-    { ar << endpoint << type << count << lva_ << offset; }
+    void save(Archive& ar, const unsigned int /*version*/) const
+    { ar << prefix << type << count << lva_ << offset; } //-V128
 
     template<class Archive>
     void load(Archive& ar, const unsigned int version)
@@ -166,18 +148,18 @@ struct gva
             HPX_THROW_EXCEPTION(version_too_new
               , "gva::load"
               , "trying to load GVA with unknown version");
-        ar >> endpoint >> type >> count >> lva_ >> offset;
+        ar >> prefix >> type >> count >> lva_ >> offset; //-V128
     }
 
-    BOOST_SERIALIZATION_SPLIT_MEMBER()
+    HPX_SERIALIZATION_SPLIT_MEMBER()
 };
 
 template <typename Char, typename Traits>
 inline std::basic_ostream<Char, Traits>&
 operator<< (std::basic_ostream<Char, Traits>& os, gva const& addr)
 {
-    boost::io::ios_flags_saver ifs(os);
-    os << "(" << addr.endpoint << " "
+    hpx::util::ios_flags_saver ifs(os);
+    os << "(" << addr.prefix << " "
        << components::get_component_type_name(addr.type) << " "
        << addr.count << " "
        << std::showbase << std::hex << addr.lva() << " "
@@ -187,19 +169,4 @@ operator<< (std::basic_ostream<Char, Traits>& os, gva const& addr)
 
 }}
 
-#if defined(__GNUG__) && !defined(__INTEL_COMPILER)
-#   if defined(HPX_GCC_DIAGNOSTIC_PRAGMA_CONTEXTS)
-#       pragma GCC diagnostic push
-#   endif
-#   pragma GCC diagnostic ignored "-Wold-style-cast"
-#endif
-BOOST_CLASS_VERSION(hpx::agas::gva, HPX_AGAS_VERSION)
-BOOST_CLASS_TRACKING(hpx::agas::gva, boost::serialization::track_never)
-#if defined(__GNUG__) && !defined(__INTEL_COMPILER)
-#if defined(HPX_GCC_DIAGNOSTIC_PRAGMA_CONTEXTS)
-#pragma GCC diagnostic pop
-#endif
-#endif
-
-#endif // HPX_83DB815F_26D5_4525_AC5B_E702FBD886D4
 

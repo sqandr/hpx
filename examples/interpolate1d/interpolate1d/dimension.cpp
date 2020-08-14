@@ -1,15 +1,14 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/util/portable_binary_iarchive.hpp>
-#include <hpx/util/portable_binary_oarchive.hpp>
+#include <hpx/serialization.hpp>
 
 #include "dimension.hpp"
 
-namespace boost { namespace serialization
+namespace hpx { namespace serialization
 {
     ///////////////////////////////////////////////////////////////////////////////
     // implement the serialization functions
@@ -22,11 +21,9 @@ namespace boost { namespace serialization
     ///////////////////////////////////////////////////////////////////////////
     // explicit instantiation for the correct archive types
     template HPX_COMPONENT_EXPORT void
-    serialize(hpx::util::portable_binary_iarchive&, interpolate1d::dimension&,
-        unsigned int const);
+    serialize(input_archive&, interpolate1d::dimension&, unsigned int const);
     template HPX_COMPONENT_EXPORT void
-    serialize(hpx::util::portable_binary_oarchive&, interpolate1d::dimension&,
-        unsigned int const);
+    serialize(output_archive&, interpolate1d::dimension&, unsigned int const);
 }}
 
 

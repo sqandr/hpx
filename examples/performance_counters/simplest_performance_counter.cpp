@@ -1,5 +1,6 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
@@ -9,24 +10,33 @@
 #include <hpx/hpx_init.hpp>
 #include <hpx/include/performance_counters.hpp>
 
-#include <boost/atomic.hpp>
+#include <atomic>
+#include <cstdint>
 
 ///////////////////////////////////////////////////////////////////////////////
 // The atomic variable 'counter' ensures the thread safety of the counter.
-boost::atomic<boost::int64_t> counter(0);
+std::atomic<std::int64_t> counter(0);
 
-boost::int64_t some_performance_data()
+std::int64_t some_performance_data(bool reset)
 {
-    return ++counter;
+    ++counter;
+    return hpx::util::get_and_reset_value(counter, reset);
 }
 
 void register_counter_type()
 {
     // Call the HPX API function to register the counter type.
     hpx::performance_counters::install_counter_type(
-        "/test/data",                                   // counter type name
-        &some_performance_data,                         // function providing counter data
-        "returns a linearly increasing counter value"   // description text
+        // counter type name
+        "/test/data",
+        // function providing counter data
+        &some_performance_data,
+        // description text
+        "returns a linearly increasing counter value",
+        // unit of measure
+        "",
+        // counter type
+        hpx::performance_counters::counter_monotonically_increasing
     );
 }
 

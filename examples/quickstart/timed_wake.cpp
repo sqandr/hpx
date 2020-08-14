@@ -1,21 +1,23 @@
 //  Copyright (c) 2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 #include <hpx/config.hpp>
-#include <hpx/hpx_fwd.hpp>
+#include <hpx/hpx.hpp>
 #include <hpx/hpx_init.hpp>
-#include <hpx/runtime/threads/thread_helpers.hpp>
-#include <hpx/util/high_resolution_timer.hpp>
+#include <hpx/threading_base/thread_helpers.hpp>
+#include <hpx/modules/timing.hpp>
 
-#include <boost/date_time/posix_time/posix_time.hpp>
+#include <chrono>
+#include <iostream>
 
-using boost::program_options::variables_map;
-using boost::program_options::options_description;
-using boost::program_options::value;
+using hpx::program_options::variables_map;
+using hpx::program_options::options_description;
+using hpx::program_options::value;
 
-using boost::posix_time::seconds;
+using std::chrono::seconds;
 
 using hpx::init;
 using hpx::finalize;
@@ -39,8 +41,8 @@ int hpx_main(variables_map& vm)
         // Schedule a wakeup in 5 seconds.
         set_thread_state(get_self_id(), seconds(5), pending);
 
-        // Suspend this pxthread.
-        get_self().yield(suspended);
+        // Suspend this HPX thread.
+        hpx::this_thread::suspend(suspended);
 
         std::cout << "woke up after " << t.elapsed() << " seconds\n";
     }

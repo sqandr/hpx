@@ -1,15 +1,18 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_SHENEOS_PARTITION3D_AUG_08_2011_1220PM)
-#define HPX_SHENEOS_PARTITION3D_AUG_08_2011_1220PM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/lcos/future.hpp>
-#include <hpx/runtime/actions/component_action.hpp>
-#include <hpx/runtime/components/server/simple_component_base.hpp>
+#include <hpx/hpx.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "../dimension.hpp"
 
@@ -26,28 +29,34 @@ namespace sheneos
         double temp_;
         double rho_;
     };
+
+    ///////////////////////////////////////////////////////////////////////////
+    // one mutex per application instance
+    typedef hpx::lcos::local::spinlock mutex_type;
+    extern mutex_type mtx_;
 }
 
 namespace sheneos { namespace server
 {
     ///////////////////////////////////////////////////////////////////////////
     class HPX_COMPONENT_EXPORT partition3d
-      : public hpx::components::simple_component_base<partition3d>
+      : public hpx::components::component_base<partition3d>
     {
+    private:
         inline void init_dimension(std::string const&, int, dimension const&,
-            char const*, boost::scoped_array<double>&);
+            char const*, std::unique_ptr<double[]>&);
 
         inline void init_data(std::string const& datafilename,
-            char const* name, boost::scoped_array<double>& values,
+            char const* name, std::unique_ptr<double[]>& values,
             std::size_t array_size);
 
         /// Get index of a given value in the one-dimensional array-slice.
-        inline std::size_t get_index(dimension::type d, double value);
+        inline std::size_t get_index(dimension::type d, double value) const;
 
         /// Tri-linear interpolation routine.
-        inline double interpolate(double* values,
+        inline double tl_interpolate(double* values,
             std::size_t idx_x, std::size_t idx_y, std::size_t idx_z,
-            double delta_ye, double delta_logtemp, double delta_logrho);
+            double delta_ye, double delta_logtemp, double delta_logrho) const;
 
     public:
         enum eos_values {
@@ -64,7 +73,8 @@ namespace sheneos { namespace server
 #if SHENEOS_SUPPORT_FULL_API
             // Chemical potentials.
             muhat = 0x00000100,     ///< mu_n - mu_p
-            mu_e = 0x00000200,      ///< electron chemical potential including electron rest mass
+            mu_e = 0x00000200,      ///< electron chemical potential
+                                    ///< including electron rest mass
             mu_p = 0x00000400,      ///< proton chemical potential
             mu_n = 0x00000800,      ///< neutron chemical potential
             // Compositions.
@@ -80,15 +90,6 @@ namespace sheneos { namespace server
         };
 
         ///////////////////////////////////////////////////////////////////////
-        enum actions
-        {
-            partition3d_init = 0,
-            partition3d_interpolate = 1,
-            partition3d_interpolate_one = 2,
-            partition3d_interpolate_bulk = 3,
-            partition3d_interpolate_one_bulk = 4
-        };
-
         partition3d();
 
         ///////////////////////////////////////////////////////////////////////
@@ -106,7 +107,7 @@ namespace sheneos { namespace server
         /// \param eosvalues [in] The EOS values to interpolate. Must be
         ///                  in the range of this partition.
         std::vector<double> interpolate(double ye, double temp, double rho,
-            boost::uint32_t eosvalues);
+            std::uint32_t eosvalues) const;
 
         /// Perform an interpolation of one given field on this partition.
         ///
@@ -116,7 +117,7 @@ namespace sheneos { namespace server
         /// \param eosvalues [in] The EOS value to interpolate. Must be
         ///                  in the range of this partition.
         double interpolate_one(double ye, double temp, double rho,
-            boost::uint32_t eosvalue);
+            std::uint32_t eosvalue) const;
 
         /// Perform several interpolations of all given fields on this partition.
         ///
@@ -126,7 +127,7 @@ namespace sheneos { namespace server
         ///                  in the range of this partition.
         std::vector<std::vector<double> >
         interpolate_bulk(std::vector<sheneos_coord> const& coords,
-            boost::uint32_t eosvalues);
+            std::uint32_t eosvalues) const;
 
         /// Perform several interpolations of one given field on this partition.
         ///
@@ -136,67 +137,23 @@ namespace sheneos { namespace server
         ///                  in the range of this partition.
         std::vector<double>
         interpolate_one_bulk(std::vector<sheneos_coord> const& coords,
-            boost::uint32_t eosvalue);
+            std::uint32_t eosvalue) const;
 
         ///////////////////////////////////////////////////////////////////////
         // Each of the exposed functions needs to be encapsulated into an
         // action type, generating all required boilerplate code for threads,
         // serialization, etc.
-        typedef hpx::actions::action4<
-            partition3d,                        // Component server type.
-            partition3d_init,                   // Action code.
-            std::string const&,                 // Arguments of this action.
-            dimension const&,
-            dimension const&,
-            dimension const&,
-            &partition3d::init                  // Method bound to this action.
-        > init_action;
-
-        typedef hpx::actions::result_action4<
-            partition3d,                        // Component server type.
-            std::vector<double>,                // Return type.
-            partition3d_interpolate,            // Action code.
-            double,                             // Arguments of this action.
-            double,
-            double,
-            boost::uint32_t,
-            &partition3d::interpolate           // Method bound to this action.
-        > interpolate_action;
-
-        typedef hpx::actions::result_action4<
-            partition3d,                        // Component server type.
-            double,                             // Return type.
-            partition3d_interpolate_one,        // Action code.
-            double,                             // Arguments of this action.
-            double,
-            double,
-            boost::uint32_t,
-            &partition3d::interpolate_one       // Method bound to this action.
-        > interpolate_one_action;
-
-        typedef hpx::actions::result_action2<
-            partition3d,                        // Component server type.
-            std::vector<std::vector<double> >,  // Return type.
-            partition3d_interpolate_bulk,       // Action code.
-            std::vector<sheneos_coord> const&,  // Arguments of this action.
-            boost::uint32_t,
-            &partition3d::interpolate_bulk      // Method bound to this action.
-        > interpolate_bulk_action;
-
-        typedef hpx::actions::result_action2<
-            partition3d,                        // Component server type.
-            std::vector<double>,                // Return type.
-            partition3d_interpolate_one_bulk,   // Action code.
-            std::vector<sheneos_coord> const&,  // Arguments of this action.
-            boost::uint32_t,
-            &partition3d::interpolate_one_bulk  // Method bound to this action.
-        > interpolate_one_bulk_action;
+        HPX_DEFINE_COMPONENT_ACTION(partition3d, init);
+        HPX_DEFINE_COMPONENT_ACTION(partition3d, interpolate);
+        HPX_DEFINE_COMPONENT_ACTION(partition3d, interpolate_one);
+        HPX_DEFINE_COMPONENT_ACTION(partition3d, interpolate_bulk);
+        HPX_DEFINE_COMPONENT_ACTION(partition3d, interpolate_one_bulk);
 
     protected:
         double interpolate_one(sheneos_coord const& c,
-            boost::uint32_t eosvalue);
+            std::uint32_t eosvalue) const;
         std::vector<double> interpolate(sheneos_coord const& c,
-            boost::uint32_t eosvalues);
+            std::uint32_t eosvalues) const;
 
     private:
         dimension dim_[dimension::dim];
@@ -206,69 +163,75 @@ namespace sheneos { namespace server
         double delta_[dimension::dim];
 
         // Values of independent variables.
-        boost::scoped_array<double> ye_values_;
-        boost::scoped_array<double> logtemp_values_;
-        boost::scoped_array<double> logrho_values_;
+        std::unique_ptr<double[]> ye_values_;
+        std::unique_ptr<double[]> logtemp_values_;
+        std::unique_ptr<double[]> logrho_values_;
 
         double energy_shift_;
 
         // Dependent variables.
-        boost::scoped_array<double> logpress_values_;
-        boost::scoped_array<double> logenergy_values_;
-        boost::scoped_array<double> entropy_values_;
-        boost::scoped_array<double> munu_values_;
-        boost::scoped_array<double> cs2_values_;
-        boost::scoped_array<double> dedt_values_;
-        boost::scoped_array<double> dpdrhoe_values_;
-        boost::scoped_array<double> dpderho_values_;
+        std::unique_ptr<double[]> logpress_values_;
+        std::unique_ptr<double[]> logenergy_values_;
+        std::unique_ptr<double[]> entropy_values_;
+        std::unique_ptr<double[]> munu_values_;
+        std::unique_ptr<double[]> cs2_values_;
+        std::unique_ptr<double[]> dedt_values_;
+        std::unique_ptr<double[]> dpdrhoe_values_;
+        std::unique_ptr<double[]> dpderho_values_;
 #if SHENEOS_SUPPORT_FULL_API
-        boost::scoped_array<double> muhat_values_;
-        boost::scoped_array<double> mu_e_values_;
-        boost::scoped_array<double> mu_p_values_;
-        boost::scoped_array<double> mu_n_values_;
-        boost::scoped_array<double> xa_values_;
-        boost::scoped_array<double> xh_values_;
-        boost::scoped_array<double> xn_values_;
-        boost::scoped_array<double> xp_values_;
-        boost::scoped_array<double> abar_values_;
-        boost::scoped_array<double> zbar_values_;
-        boost::scoped_array<double> gamma_values_;
+        std::unique_ptr<double[]> muhat_values_;
+        std::unique_ptr<double[]> mu_e_values_;
+        std::unique_ptr<double[]> mu_p_values_;
+        std::unique_ptr<double[]> mu_n_values_;
+        std::unique_ptr<double[]> xa_values_;
+        std::unique_ptr<double[]> xh_values_;
+        std::unique_ptr<double[]> xn_values_;
+        std::unique_ptr<double[]> xp_values_;
+        std::unique_ptr<double[]> abar_values_;
+        std::unique_ptr<double[]> zbar_values_;
+        std::unique_ptr<double[]> gamma_values_;
 #endif
     };
 }}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Non-intrusive serialization.
-namespace boost { namespace serialization
+namespace hpx { namespace serialization
 {
-    template <typename Archive>
-    void serialize(Archive&, sheneos::sheneos_coord&, unsigned int const);
+    HPX_COMPONENT_EXPORT void
+    serialize(input_archive& ar,
+        sheneos::sheneos_coord& coord, unsigned int const);
+
+    HPX_COMPONENT_EXPORT void
+    serialize(output_archive& ar,
+        sheneos::sheneos_coord& coord, unsigned int const);
 }}
 
 ///////////////////////////////////////////////////////////////////////////////
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     sheneos::server::partition3d::init_action,
     sheneos_partition3d_init_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_ACTION_USES_LARGE_STACK(sheneos::server::partition3d::init_action);
+
+HPX_REGISTER_ACTION_DECLARATION(
     sheneos::server::partition3d::interpolate_action,
     sheneos_partition3d_interpolate_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     sheneos::server::partition3d::interpolate_one_action,
     sheneos_partition3d_interpolate_one_action);
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     sheneos::server::partition3d::interpolate_bulk_action,
     sheneos_partition3d_interpolate_bulk_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::lcos::base_lco_with_value<std::vector<std::vector<double> > >::set_value_action,
     set_value_action_vector_vector_double);
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     sheneos::server::partition3d::interpolate_one_bulk_action,
     sheneos_partition3d_interpolate_one_bulk_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::lcos::base_lco_with_value<std::vector<double> >::set_value_action,
     set_value_action_vector_double);
 
-#endif
 

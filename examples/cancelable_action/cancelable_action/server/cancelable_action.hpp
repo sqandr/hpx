@@ -1,46 +1,55 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_EXAMPLE_CANCELABLE_ACTION_APR_21_2012_0955AM)
-#define HPX_EXAMPLE_CANCELABLE_ACTION_APR_21_2012_0955AM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/include/components.hpp>
+#include <hpx/hpx.hpp>
 #include <hpx/include/actions.hpp>
-#include <hpx/include/thread.hpp>
+#include <hpx/include/components.hpp>
+#include <hpx/include/threads.hpp>
+#include <hpx/include/util.hpp>
+
+#include <atomic>
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace examples { namespace server
 {
     ///////////////////////////////////////////////////////////////////////////
-    void delay(int c)
+    inline void delay(int c)
     {
         double volatile d = 0.;
         for (int i = 0; i < c; ++i)
             d += 1 / (2. * i + 1);
+        (void) d;
     }
 
     ///////////////////////////////////////////////////////////////////////////
     class cancelable_action
-      : public hpx::components::simple_component_base<cancelable_action>
+      : public hpx::components::component_base<cancelable_action>
     {
     private:
-        typedef hpx::lcos::local::spinlock mutex_type;
-
         struct reset_id
         {
-            reset_id(cancelable_action& this_)
+            explicit reset_id(cancelable_action& this_)
               : outer_(this_)
             {
-                mutex_type::scoped_lock l(outer_.mtx_);
-                outer_.id_ = hpx::this_thread::get_id();
+                {
+                    hpx::thread::id old_value =
+                        outer_.id_.exchange(hpx::this_thread::get_id());
+                    HPX_ASSERT(old_value == hpx::thread::id());
+                    HPX_UNUSED(old_value);
+                }
             }
             ~reset_id()
             {
-                mutex_type::scoped_lock l(outer_.mtx_);
-                outer_.id_ = hpx::thread::id();    // invalidate thread id
+                hpx::thread::id old_value =
+                    outer_.id_.exchange(hpx::thread::id());
+                HPX_ASSERT(old_value != hpx::thread::id());
+                HPX_ASSERT(outer_.id_ == hpx::thread::id());
+                HPX_UNUSED(old_value);
             }
 
             cancelable_action& outer_;
@@ -65,29 +74,27 @@ namespace examples { namespace server
         // Cancel the lengthy action above
         void cancel_it()
         {
-            mutex_type::scoped_lock l(mtx_);
-            if (id_ != hpx::thread::id()) {
-                hpx::thread::interrupt(id_);
-                id_ = hpx::thread::id();        // invalidate thread id
-            }
+            // Make sure id_ has been set
+            hpx::util::yield_while(
+                [this]() { return id_ == hpx::thread::id(); });
+            HPX_ASSERT(id_ != hpx::thread::id());
+            hpx::thread::interrupt(id_);
         }
 
         HPX_DEFINE_COMPONENT_ACTION(cancelable_action, do_it, do_it_action);
         HPX_DEFINE_COMPONENT_ACTION(cancelable_action, cancel_it, cancel_it_action);
 
     private:
-        mutable mutex_type mtx_;
-        hpx::thread::id id_;
+        std::atomic<hpx::thread::id> id_;
     };
 }}
 
 ///////////////////////////////////////////////////////////////////////////////
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     examples::server::cancelable_action::do_it_action,
     cancelable_action_do_it_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     examples::server::cancelable_action::cancel_it_action,
     cancelable_action_cancel_it_action);
 
-#endif
 

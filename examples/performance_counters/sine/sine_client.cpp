@@ -1,14 +1,19 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 #include <hpx/hpx.hpp>
 #include <hpx/hpx_init.hpp>
+#include <hpx/include/util.hpp>
 
-#include <boost/program_options.hpp>
-#include <boost/format.hpp>
-#include <boost/date_time.hpp>
+#include <hpx/modules/program_options.hpp>
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <vector>
 
 ///////////////////////////////////////////////////////////////////////////////
 // This example demonstrates the creation and use of different types of
@@ -47,32 +52,31 @@
 // every 5 seconds, restarting it after a while.
 
 ///////////////////////////////////////////////////////////////////////////////
-int monitor(boost::uint64_t pause, boost::uint64_t values)
+int monitor(std::uint64_t pause, std::uint64_t values)
 {
-    // Resolve the GID of the performances counter using it's symbolic name.
-    boost::uint32_t const prefix = hpx::get_locality_id();
-    boost::format sine_explicit("/sine{locality#%d/instance#%d}/immediate/explicit");
-    boost::format sine_implicit("/sine{locality#%d/total}/immediate/implicit");
-    boost::format sine_average("/statistics{/sine{locality#%d/instance#%d}/immediate/explicit}/average@100");
+    // Create the performances counters using their symbolic name.
+    std::uint32_t const prefix = hpx::get_locality_id();
 
-    using hpx::naming::id_type;
-    using hpx::performance_counters::get_counter;
-
-    id_type id1 = get_counter(boost::str(sine_explicit % prefix % 0));
-    id_type id2 = get_counter(boost::str(sine_implicit % prefix));
-    id_type id3 = get_counter(boost::str(sine_average % prefix % 1));
-
-    using hpx::performance_counters::stubs::performance_counter;
+    using hpx::performance_counters::performance_counter;
+    performance_counter sine_explicit(hpx::util::format(
+        "/sine{{locality#{}/instance#{}}}/immediate/explicit",
+        prefix, 0));
+    performance_counter sine_implicit(hpx::util::format(
+        "/sine{{locality#{}/total}}/immediate/implicit",
+        prefix));
+    performance_counter sine_average(hpx::util::format(
+        "/statistics{{/sine{{locality#{}/instance#{}}}/immediate/explicit}}/average@100",
+        prefix, 1));
 
     // We need to explicitly start all counters before we can use them. For
     // certain counters this could be a no-op, in which case start will return
     // 'false'.
-    performance_counter::start(id1);
-    performance_counter::start(id2);
-    performance_counter::start(id3);
+    sine_explicit.start();
+    sine_implicit.start();
+    sine_average.start();
 
     // retrieve the counter values
-    boost::uint64_t start_time = 0;
+    std::uint64_t start_time = 0;
     bool started = true;
     while (values-- > 0)
     {
@@ -80,49 +84,53 @@ int monitor(boost::uint64_t pause, boost::uint64_t values)
         using hpx::performance_counters::counter_value;
         using hpx::performance_counters::status_is_valid;
 
-        counter_value value1 = performance_counter::get_value(id1);
-        counter_value value2 = performance_counter::get_value(id2);
-        counter_value value3 = performance_counter::get_value(id3);
+        counter_value value1 = sine_explicit.get_counter_value(hpx::launch::sync);
+        counter_value value2 = sine_implicit.get_counter_value(hpx::launch::sync);
+        counter_value value3 = sine_average.get_counter_value(hpx::launch::sync);
+
         if (status_is_valid(value1.status_))
         {
             if (!start_time)
                 start_time = value2.time_;
 
-            std::cout << (boost::format("%.3f: %.4f, %.4f, %.4f\n") %
-                ((value2.time_ - start_time) * 1e-9) %
-                value1.get_value<double>() %
-                (value2.get_value<double>() / 100000.) %
+            hpx::util::format_to(std::cout, "{:.3}: {:.4}, {:.4}, {:.4}\n",
+                static_cast<double>(value2.time_ - start_time) * 1e-9,
+                value1.get_value<double>(),
+                value2.get_value<double>() / 100000.,
                 value3.get_value<double>());
         }
 
-        // stop/restart the counter referenced by id1 after 5 seconds of
+        // stop/restart the sine_explicit counter after every 5 seconds of
         // evaluation
         bool should_run =
-            (int((value2.time_ - start_time) * 1e-9) / 5) % 2 ? true : false;
-        if (should_run == started) {
+            (int(static_cast<double>(value2.time_ - start_time) * 1e-9) / 5) %
+                2 !=
+            0;
+        if (should_run == started)
+        {
             if (started) {
-                performance_counter::stop(id1);
+                sine_explicit.stop();
                 started = false;
             }
             else {
-                performance_counter::start(id1);
+                sine_explicit.start();
                 started = true;
             }
         }
 
         // give up control to the thread manager, we will be resumed after
         // 'pause' ms
-        hpx::this_thread::suspend(boost::posix_time::milliseconds(pause));
+        hpx::this_thread::suspend(std::chrono::milliseconds(pause));
     }
     return 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-int hpx_main(boost::program_options::variables_map& vm)
+int hpx_main(hpx::program_options::variables_map& vm)
 {
     // retrieve the command line arguments
-    boost::uint64_t const pause = vm["pause"].as<boost::uint64_t>();
-    boost::uint64_t const values = vm["values"].as<boost::uint64_t>();
+    std::uint64_t const pause = vm["pause"].as<std::uint64_t>();
+    std::uint64_t const values = vm["values"].as<std::uint64_t>();
 
     // do main work, i.e. query the performance counters
     std::cout << "starting sine monitoring..." << std::endl;
@@ -146,19 +154,23 @@ int hpx_main(boost::program_options::variables_map& vm)
 ///////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[])
 {
-    using boost::program_options::options_description;
-    using boost::program_options::value;
+    using hpx::program_options::options_description;
+    using hpx::program_options::value;
 
     // Configure application-specific options.
     options_description desc_commandline("usage: sine_client [options]");
     desc_commandline.add_options()
-            ("pause", value<boost::uint64_t>()->default_value(500),
+            ("pause", value<std::uint64_t>()->default_value(500),
              "milliseconds between each performance counter query")
-            ("values", value<boost::uint64_t>()->default_value(100),
+            ("values", value<std::uint64_t>()->default_value(100),
              "number of performance counter queries to perform")
         ;
 
+    std::vector<std::string> cfg = {
+        "hpx.components.sine.enabled! = 1"
+    };
+
     // Initialize and run HPX.
-    return hpx::init(desc_commandline, argc, argv);
+    return hpx::init(desc_commandline, argc, argv, cfg);
 }
 

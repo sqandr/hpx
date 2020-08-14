@@ -1,39 +1,35 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //  Copyright (c)      2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_COMPONENTS_CONSOLE_DEC_16_2008_0427PM)
-#define HPX_COMPONENTS_CONSOLE_DEC_16_2008_0427PM
+#pragma once
 
-#include <string>
-#include <vector>
-
-#include <hpx/hpx_fwd.hpp>
+#include <hpx/config.hpp>
+#include <hpx/actions/base_action.hpp>
+#include <hpx/actions_base/plain_action.hpp>
+#include <hpx/datastructures/tuple.hpp>
+#include <hpx/modules/logging.hpp>
+#include <hpx/runtime/actions/transfer_action.hpp>
+#include <hpx/runtime/actions/transfer_continuation_action.hpp>
 #include <hpx/runtime/components/component_type.hpp>
-#include <hpx/runtime/actions/plain_action.hpp>
-#include <hpx/util/logging.hpp>
-#include <hpx/util/void_cast.hpp>
+#include <hpx/serialization/vector.hpp>
 
-#include <boost/fusion/include/vector.hpp>
+#include <cstddef>
+#include <string>
+#include <utility>
+#include <vector>
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace hpx { namespace components
 {
-    typedef boost::fusion::vector3<
+    typedef hpx::util::tuple<
         logging_destination, std::size_t, std::string
     > message_type;
 
     typedef std::vector<message_type> messages_type;
-}}
-
-///////////////////////////////////////////////////////////////////////////////
-// non-intrusive serialization
-namespace boost { namespace serialization
-{
-    template <typename Archive>
-    void serialize(Archive&, hpx::components::message_type&, unsigned int const);
 }}
 
 //////////////////////////////////////////////////////////////////////////////
@@ -48,12 +44,13 @@ namespace hpx { namespace components { namespace server
     // serialization support instances
     template <typename Dummy = void>
     class console_logging_action
-      : public actions::plain_direct_action1<messages_type const&,
+      : public actions::direct_action<void (*)(messages_type const&),
         console_logging, console_logging_action<Dummy> >
     {
     private:
-        typedef actions::plain_direct_action1<
-            messages_type const&, console_logging, console_logging_action>
+        typedef actions::direct_action<
+            void (*)(messages_type const&),
+            console_logging, console_logging_action>
         base_type;
 
     public:
@@ -69,55 +66,26 @@ namespace hpx { namespace components { namespace server
           : base_type(msgs)
         {}
 
-        /// serialization support
-        static void register_base()
-        {
-            util::void_cast_register_nonvirt<console_logging_action, base_type>();
-            base_type::register_base();
-        }
-
     public:
-        template <typename Arguments>
+        template <typename T>
         static util::unused_type
-        execute_function(naming::address::address_type lva,
-            BOOST_FWD_REF(Arguments) args)
+        execute_function(naming::address_type lva,
+            naming::component_type comptype, T&& v)
         {
             try {
                 // call the function, ignoring the return value
-                console_logging(
-                    boost::move(boost::fusion::at_c<0>(args)));
+                console_logging(std::forward<T>(v));
             }
-            catch (hpx::exception const& /*e*/) {
+            catch (...) {
                 /**/;      // no logging!
             }
             return util::unused;
         }
-
-    private:
-        // serialization support
-        friend class boost::serialization::access;
-
-        template<class Archive>
-        void serialize(Archive& ar, const unsigned int /*version*/)
-        {
-            ar & boost::serialization::base_object<base_type>(*this);
-        }
     };
 }}}
 
-HPX_REGISTER_PLAIN_ACTION_DECLARATION(
-    hpx::components::server::console_logging_action<>
-)
+HPX_REGISTER_ACTION_DECLARATION(
+    hpx::components::server::console_logging_action<>,
+    console_logging_action)
 
-namespace hpx { namespace traits
-{
-    template <typename Dummy>
-    struct needs_guid_initialization<
-            hpx::actions::transfer_action<
-                hpx::components::server::console_logging_action<Dummy> > >
-      : boost::mpl::false_
-    {};
-}}
-
-#endif
 

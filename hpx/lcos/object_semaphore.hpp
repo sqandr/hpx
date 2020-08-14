@@ -1,109 +1,94 @@
 //  Copyright (c)      2011 Bryce Lelbach
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_1FB4A979_B6B6_4845_BD95_3CEC605011A2)
-#define HPX_1FB4A979_B6B6_4845_BD95_3CEC605011A2
+#pragma once
 
-#include <hpx/exception.hpp>
+#include <hpx/config.hpp>
+#include <hpx/assert.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/lcos/server/object_semaphore.hpp>
 #include <hpx/runtime/components/client_base.hpp>
-#include <hpx/lcos/stubs/object_semaphore.hpp>
+
+#include <cstdint>
+#include <utility>
 
 namespace hpx { namespace lcos
 {
-
-template <typename ValueType>
-struct object_semaphore
-  : components::client_base<
-        object_semaphore<ValueType>,
-        lcos::stubs::object_semaphore<ValueType>
-    >
-{
-    typedef components::client_base<
-        object_semaphore,
-        lcos::stubs::object_semaphore<ValueType>
-    > base_type;
-
-    object_semaphore() {}
-
-    object_semaphore(naming::id_type gid) : base_type(gid) {}
-
-    ///////////////////////////////////////////////////////////////////////////
-    lcos::future<void> signal_async(
-        ValueType const& val
-      , boost::uint64_t count = 1)
+    template <typename ValueType>
+    struct object_semaphore
+      : components::client_base<
+            object_semaphore<ValueType>,
+            lcos::server::object_semaphore<ValueType>
+        >
     {
-        BOOST_ASSERT(this->gid_);
-        return this->base_type::signal_async(this->gid_, val, count);
-    }
+        typedef lcos::server::object_semaphore<ValueType> server_type;
 
-    void signal_sync(
-        ValueType const& val
-      , boost::uint64_t count = 1)
-    {
-        BOOST_ASSERT(this->gid_);
-        return this->base_type::signal_sync(this->gid_, val, count);
-    }
+        typedef components::client_base<
+            object_semaphore,
+            lcos::server::object_semaphore<ValueType>
+        > base_type;
 
-    void signal(
-        ValueType const& val
-      , boost::uint64_t count = 1)
-    {
-        signal_sync(val, count);
-    }
+        object_semaphore() = default;
 
-    ///////////////////////////////////////////////////////////////////////////
-    lcos::future<ValueType> get_async()
-    {
-        BOOST_ASSERT(this->gid_);
-        return this->base_type::get_async(this->gid_);
-    }
+        explicit object_semaphore(naming::id_type gid)
+          : base_type(std::move(gid))
+        {
+        }
 
-    ValueType get_sync()
-    {
-        BOOST_ASSERT(this->gid_);
-        return this->base_type::get_sync(this->gid_);
-    }
+        ///////////////////////////////////////////////////////////////////////
+        lcos::future<void> signal(launch::async_policy,
+            ValueType const& val, std::uint64_t count = 1)
+        {
+            HPX_ASSERT(this->get_id());
+            typedef typename server_type::signal_action action_type;
+            return hpx::async<action_type>(this->get_id(), val, count);
+        }
+        void signal(launch::sync_policy,
+            ValueType const& val, std::uint64_t count = 1)
+        {
+            signal(hpx::async, val, count).get();
+        }
 
-    ValueType get()
-    { return get_sync(); }
+        ///////////////////////////////////////////////////////////////////////
+        lcos::future<ValueType> get(launch::async_policy)
+        {
+            HPX_ASSERT(this->get_id());
+            typedef typename server_type::get_action action_type;
+            return hpx::async<action_type>(this->get_id());
+        }
+        ValueType get(launch::sync_policy)
+        {
+            return get(launch::async).get();
+        }
 
-    ///////////////////////////////////////////////////////////////////////////
-    void abort_pending_async(error ec = no_success)
-    {
-        BOOST_ASSERT(this->gid_);
-        this->base_type::abort_pending_sync(this->gid_, ec);
-    }
+        ///////////////////////////////////////////////////////////////////////
+        future<void> abort_pending(launch::async_policy, error ec = no_success)
+        {
+            HPX_ASSERT(this->get_id());
+            typedef typename server_type::abort_pending_action action_type;
+            return hpx::async<action_type>(this->get_id(), ec);
+        }
+        void abort_pending(launch::sync_policy, error ec = no_success)
+        {
+            abort_pending(launch::async).get();
+        }
 
-    void abort_pending_sync(error ec = no_success)
-    {
-        BOOST_ASSERT(this->gid_);
-        this->base_type::abort_pending_sync(this->gid_, ec);
-    }
-
-    void abort_pending(error ec = no_success)
-    { abort_pending_sync(ec); }
-
-    ///////////////////////////////////////////////////////////////////////////
-    void wait_async()
-    {
-        BOOST_ASSERT(this->gid_);
-        this->base_type::wait_sync(this->gid_);
-    }
-
-    void wait_sync()
-    {
-        BOOST_ASSERT(this->gid_);
-        this->base_type::wait_sync(this->gid_);
-    }
-
-    void wait()
-    { wait_sync(); }
-};
-
+        ///////////////////////////////////////////////////////////////////////
+        void wait(launch::async_policy)
+        {
+            HPX_ASSERT(this->get_id());
+            typedef typename server_type::wait_action action_type;
+            return hpx::async<action_type>(this->get_id());
+        }
+        void wait(launch::sync_policy)
+        {
+            wait(launch::async).get();
+        }
+    };
 }}
 
-#endif // HPX_1FB4A979_B6B6_4845_BD95_3CEC605011A2
 

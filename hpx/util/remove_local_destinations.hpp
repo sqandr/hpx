@@ -1,20 +1,20 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_UTIL_REMOVE_LOCAL_DESTINATIONS_JUL_16_2012_1119AM)
-#define HPX_UTIL_REMOVE_LOCAL_DESTINATIONS_JUL_16_2012_1119AM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/naming/name.hpp>
+#include <hpx/assert.hpp>
 #include <hpx/runtime/naming/address.hpp>
-
-#include <vector>
+#include <hpx/runtime/naming/name.hpp>
 
 #include <boost/dynamic_bitset.hpp>
-#include <boost/move/move.hpp>
-#include <boost/assert.hpp>
+
+#include <cstddef>
+#include <utility>
+#include <vector>
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace hpx { namespace util
@@ -27,14 +27,14 @@ namespace hpx { namespace util
         std::vector<naming::address>& addrs,
         boost::dynamic_bitset<> const& locals)
     {
-        BOOST_ASSERT(gids.size() == addrs.size());
+        HPX_ASSERT(gids.size() == addrs.size());
 
         std::vector<naming::gid_type>::iterator gids_it = gids.begin();
         std::vector<naming::gid_type>::iterator gids_end = gids.end();
         std::vector<naming::address>::iterator addrs_it = addrs.begin();
 
         // gids_it = find_if(gids_it, gids_end, pred)
-        std::size_t i = 0;
+        std::size_t i = 0; //-V707
         for (/**/; gids_it != gids_end; ++gids_it, ++addrs_it)
         {
             if (locals.test(i++))
@@ -51,8 +51,8 @@ namespace hpx { namespace util
         {
             if (!locals.test(i++))
             {
-                *gids_next++ = boost::move(*gids_it);
-                *addrs_next++ = boost::move(*addrs_it);
+                *gids_next++ = std::move(*gids_it);
+                *addrs_next++ = std::move(*addrs_it);
             }
         }
 
@@ -60,4 +60,3 @@ namespace hpx { namespace util
     }
 }}
 
-#endif

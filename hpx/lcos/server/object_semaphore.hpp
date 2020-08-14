@@ -1,23 +1,29 @@
 //  Copyright (c)      2011 Bryce Lelbach
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_1A262552_0D65_4C7D_887E_D11B02AAAC7E)
-#define HPX_1A262552_0D65_4C7D_887E_D11B02AAAC7E
+#pragma once
+
+#include <hpx/config.hpp>
+#include <hpx/assert.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/lcos/base_lco.hpp>
+#include <hpx/synchronization/spinlock.hpp>
+#include <hpx/async_distributed/applier/trigger.hpp>
+#include <hpx/runtime/components/component_type.hpp>
+#include <hpx/runtime/components/server/managed_component_base.hpp>
+#include <hpx/thread_support/unlock_guard.hpp>
 
 #include <boost/intrusive/slist.hpp>
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/exception.hpp>
-#include <hpx/lcos/local/spinlock.hpp>
-#include <hpx/util/unlock_lock.hpp>
-#include <hpx/runtime/threads/thread_data.hpp>
-#include <hpx/runtime/components/component_type.hpp>
-#include <hpx/runtime/components/server/managed_component_base.hpp>
-#include <hpx/runtime/applier/trigger.hpp>
-#include <hpx/lcos/base_lco.hpp>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <utility>
 
 namespace hpx { namespace lcos { namespace server
 {
@@ -28,14 +34,6 @@ struct object_semaphore
         object_semaphore<ValueType>
     >
 {
-    enum action
-    {
-        object_semaphore_signal,
-        object_semaphore_get,
-        object_semaphore_abort_pending,
-        object_semaphore_wait
-    };
-
     typedef components::managed_component_base<object_semaphore> base_type;
 
     typedef hpx::lcos::local::spinlock mutex_type;
@@ -48,7 +46,7 @@ struct object_semaphore
             boost::intrusive::link_mode<boost::intrusive::normal_link>
         > hook_type;
 
-        queue_thread_entry(naming::id_type const& id)
+        explicit queue_thread_entry(naming::id_type const& id)
           : id_(id) {}
 
         naming::id_type id_;
@@ -73,11 +71,11 @@ struct object_semaphore
             boost::intrusive::link_mode<boost::intrusive::normal_link>
         > hook_type;
 
-        queue_value_entry(ValueType const& val, boost::uint64_t count)
+        queue_value_entry(ValueType const& val, std::uint64_t count)
           : val_(val), count_(count) {}
 
         ValueType val_;
-        boost::uint64_t count_;
+        std::uint64_t count_;
         hook_type slist_hook_;
     };
 
@@ -94,14 +92,16 @@ struct object_semaphore
 
   private:
     // assumes that this thread has acquired l
-    void resume(mutex_type::scoped_lock& l)
+    void resume(std::unique_lock<mutex_type>& l)
     { // {{{
+        HPX_ASSERT(l.owns_lock());
+
         // resume as many waiting LCOs as possible
         while (!thread_queue_.empty() && !value_queue_.empty())
         {
             ValueType value = value_queue_.front().val_;
 
-            BOOST_ASSERT(0 != value_queue_.front().count_);
+            HPX_ASSERT(0 != value_queue_.front().count_);
 
             if (1 == value_queue_.front().count_)
             {
@@ -117,16 +117,16 @@ struct object_semaphore
             thread_queue_.pop_front();
 
             {
-                util::unlock_the_lock<mutex_type::scoped_lock> ul(l);
+                util::unlock_guard<std::unique_lock<mutex_type> > ul(l);
 
                 // set the LCO's result
-                applier::trigger(id, boost::move(value));
+                applier::trigger(id, std::move(value));
             }
         }
     } // }}}
 
   public:
-    object_semaphore() {}
+    object_semaphore() = default;
 
     ~object_semaphore()
     { // {{{
@@ -134,13 +134,13 @@ struct object_semaphore
             abort_pending(deadlock);
     } // }}}
 
-    void signal(ValueType const& val, boost::uint64_t count)
+    void signal(ValueType const& val, std::uint64_t count)
     { // {{{
         // push back the new value onto the queue
-        HPX_STD_UNIQUE_PTR<queue_value_entry> node
+        std::unique_ptr<queue_value_entry> node
             (new queue_value_entry(val, count));
 
-        mutex_type::scoped_lock l(mtx_);
+        std::unique_lock<mutex_type> l(mtx_);
         value_queue_.push_back(*node);
 
         node.release();
@@ -151,9 +151,9 @@ struct object_semaphore
     void get(naming::id_type const& lco)
     { // {{{
         // push the LCO's GID onto the queue
-        HPX_STD_UNIQUE_PTR<queue_thread_entry> node(new queue_thread_entry(lco));
+        std::unique_ptr<queue_thread_entry> node(new queue_thread_entry(lco));
 
-        mutex_type::scoped_lock l(mtx_);
+        std::unique_lock<mutex_type> l(mtx_);
 
         thread_queue_.push_back(*node);
 
@@ -164,7 +164,7 @@ struct object_semaphore
 
     void abort_pending(error ec)
     { // {{{
-        mutex_type::scoped_lock l(mtx_);
+        std::lock_guard<mutex_type> l(mtx_);
 
         LLCO_(info)
             << "object_semaphore::abort_pending: thread_queue is not empty, "
@@ -185,13 +185,13 @@ struct object_semaphore
                     "aborting pending thread");
             }
 
-            catch (hpx::exception const& /*e*/)
+            catch (...)
             {
-                applier::trigger_error(id, boost::current_exception());
+                applier::trigger_error(id, std::current_exception());
             }
         }
 
-        BOOST_ASSERT(thread_queue_.empty());
+        HPX_ASSERT(thread_queue_.empty());
     } // }}}
 
     void wait()
@@ -200,7 +200,7 @@ struct object_semaphore
             lcos::template base_lco_with_value<ValueType>::get_value_action
         action_type;
 
-        mutex_type::scoped_lock l(mtx_);
+        std::lock_guard<mutex_type> l(mtx_);
 
         typename thread_queue_type::const_iterator it = thread_queue_.begin()
                                                  , end = thread_queue_.end();
@@ -215,33 +215,11 @@ struct object_semaphore
         }
     } // }}}
 
-    typedef hpx::actions::action2<
-        object_semaphore<ValueType>
-      , object_semaphore_signal
-      , ValueType const&
-      , boost::uint64_t
-      , &object_semaphore<ValueType>::signal
-    > signal_action;
-
-    typedef hpx::actions::action1<
-        object_semaphore<ValueType>
-      , object_semaphore_get
-      , naming::id_type const& // lco
-      , &object_semaphore<ValueType>::get
-    > get_action;
-
-    typedef hpx::actions::action1<
-        object_semaphore<ValueType>
-      , object_semaphore_abort_pending
-      , error
-      , &object_semaphore<ValueType>::abort_pending
-    > abort_pending_action;
-
-    typedef hpx::actions::action0<
-        object_semaphore<ValueType>
-      , object_semaphore_wait
-      , &object_semaphore<ValueType>::wait
-    > wait_action;
+    HPX_DEFINE_COMPONENT_ACTION(object_semaphore, signal, signal_action);
+    HPX_DEFINE_COMPONENT_ACTION(object_semaphore, get, get_action);
+    HPX_DEFINE_COMPONENT_ACTION(object_semaphore, abort_pending,
+        abort_pending_action);
+    HPX_DEFINE_COMPONENT_ACTION(object_semaphore, wait, wait_action);
 
   private:
     value_queue_type value_queue_;
@@ -251,5 +229,4 @@ struct object_semaphore
 
 }}}
 
-#endif // HPX_1A262552_0D65_4C7D_887E_D11B02AAAC7E
 

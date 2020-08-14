@@ -1,24 +1,26 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //  Copyright (c) 2011      Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <sstream>
-
-#include <hpx/runtime/agas/interface.hpp>
 #include <hpx/hpx_init.hpp>
+#include <hpx/include/components.hpp>
+#include <hpx/runtime/agas/interface.hpp>
+#include <hpx/include/util.hpp>
 
 #include "throttle/throttle.hpp"
 
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/split.hpp>
-#include <boost/format.hpp>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
-using boost::program_options::variables_map;
+using hpx::program_options::variables_map;
 
-using boost::algorithm::is_space;
-using boost::algorithm::split;
+using hpx::string_util::is_space;
+using hpx::string_util::split;
 
 using hpx::naming::get_agas_client;
 
@@ -26,17 +28,16 @@ using hpx::naming::get_agas_client;
 int hpx_main(variables_map& vm)
 {
     try {
-        std::cout << ( boost::format("prefix: %d")
-                     % hpx::naming::get_locality_id_from_id(hpx::find_here()))
-                  << std::endl;
+        hpx::util::format_to(std::cout, "prefix: {}",
+            hpx::naming::get_locality_id_from_id(hpx::find_here())) << std::endl;
 
         // Try to connect to existing throttle instance, create a new one if
         // this fails.
         char const* throttle_component_name = "/throttle/0";
-        hpx::naming::id_type gid;
-        hpx::agas::resolve_name(throttle_component_name, gid);
+        hpx::naming::id_type gid =
+            hpx::agas::resolve_name(hpx::launch::sync, throttle_component_name);
         throttle::throttle t;
-        if (!t.get_gid()) {
+        if (!t.get_id()) {
             std::vector<hpx::naming::id_type> localities =
                 hpx::find_remote_localities();
 
@@ -45,12 +46,9 @@ int hpx_main(variables_map& vm)
             if (!localities.empty()) {
                 // use AGAS client to get the component type as we do not
                 // register any factories
-                hpx::components::component_type type =
-                    get_agas_client().get_component_id("throttle_throttle_type");
-                std::cout << "throttle component type: " << (int)type << std::endl;
-
-                t.create(localities[0], type);
-                hpx::agas::register_name(throttle_component_name, t.get_gid());
+                t.create(localities[0]);
+                hpx::agas::register_name(hpx::launch::sync,
+                    throttle_component_name, t.get_id());
             }
             else {
                 std::cerr << "Can't find throttle component." << std::endl;
@@ -58,7 +56,7 @@ int hpx_main(variables_map& vm)
         }
 
         // handle commands
-        if (t.get_gid()) {
+        if (t.get_id()) {
             if (vm.count("suspend")) {
                 t.suspend(vm["suspend"].as<int>());
             }
@@ -68,7 +66,8 @@ int hpx_main(variables_map& vm)
             else if (vm.count("release")) {
                 // unregister from AGAS, remove additional reference count which
                 // will allow for the throttle instance to be released
-                hpx::agas::unregister_name(throttle_component_name);
+                hpx::agas::unregister_name(hpx::launch::sync,
+                    throttle_component_name);
             }
         }
     }
@@ -83,7 +82,7 @@ int hpx_main(variables_map& vm)
 ///////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[])
 {
-    namespace po = boost::program_options;
+    namespace po = hpx::program_options;
 
     // Configure application-specific options
     po::options_description cmdline("Usage: " HPX_APPLICATION_STRING " [options]");
@@ -94,10 +93,12 @@ int main(int argc, char* argv[])
     ;
 
     // Disable loading of all external components
-    std::vector<std::string> cfg;
-    cfg.push_back("hpx.components.load_external=0");
-    HPX_STD_FUNCTION<void()> empty;
+    std::vector<std::string> const cfg = {
+        "hpx.components.load_external=0",
+        "hpx.run_hpx_main!=1"
+    };
 
-    return hpx::init(cmdline, argc, argv, cfg, empty, empty, hpx::runtime_mode_connect);
+    hpx::util::function_nonser<void()> const empty;
+    return hpx::init(cmdline, argc, argv, cfg, empty, empty, hpx::runtime_mode::connect);
 }
 

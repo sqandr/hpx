@@ -1,19 +1,20 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c) 2011 Bryce Adelstein-Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
-#if !defined(HPX_CDD12289_0A65_47A4_BC53_A4670CDAF5A7)
-#define HPX_CDD12289_0A65_47A4_BC53_A4670CDAF5A7
+#pragma once
+
+#include <hpx/modules/actions.hpp>
+#include <hpx/modules/actions_base.hpp>
+#include <hpx/runtime/actions/transfer_action.hpp>
+#include <hpx/runtime/actions/transfer_continuation_action.hpp>
+#include <hpx/runtime/components/server/simple_component_base.hpp>
 
 #include <vector>
-
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/components/constructor_argument.hpp>
-#include <hpx/runtime/components/server/simple_component_base.hpp>
-#include <hpx/runtime/actions/component_action.hpp>
 
 namespace hpx { namespace test { namespace server
 {
@@ -32,9 +33,9 @@ struct HPX_COMPONENT_EXPORT simple_refcnt_checker
     {}
 
     simple_refcnt_checker(
-        components::constructor_argument const& target_
+        naming::id_type const& target
         )
-      : target_(boost::get<naming::id_type>(target_))
+      : target_(target)
       , references_()
     {}
 
@@ -47,28 +48,13 @@ struct HPX_COMPONENT_EXPORT simple_refcnt_checker
         references_.push_back(gid);
     }
 
-    enum actions
-    {
-        action_take_reference
-    };
-
-    typedef hpx::actions::action1<
-        // component
-        simple_refcnt_checker
-        // action code
-      , action_take_reference
-        // arguments
-      , naming::id_type const&
-        // method
-      , &simple_refcnt_checker::take_reference
-    > take_reference_action;
+    HPX_DEFINE_COMPONENT_ACTION(simple_refcnt_checker, take_reference);
 };
 
 }}}
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::test::server::simple_refcnt_checker::take_reference_action,
     simple_refcnt_checker_take_reference_action);
 
-#endif // HPX_CDD12289_0A65_47A4_BC53_A4670CDAF5A7
 

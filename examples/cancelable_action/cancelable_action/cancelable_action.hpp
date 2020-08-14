@@ -1,11 +1,12 @@
 //  Copyright (c) 2007-2011 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_EXAMPLE_CANCELABLE_ACTION_APR_19_1052AM)
-#define HPX_EXAMPLE_CANCELABLE_ACTION_APR_19_1052AM
+#pragma once
 
+#include <hpx/assert.hpp>
 #include <hpx/include/components.hpp>
 
 #include "stubs/cancelable_action.hpp"
@@ -27,29 +28,27 @@ namespace examples
     public:
         // Default construct an empty client side representation (not
         // connected to any existing component).
-        cancelable_action()
-        {}
+        cancelable_action() = default;
 
         /// Create a client side representation of an object which is newly
         /// created on the given locality
-        cancelable_action(hpx::naming::id_type const& target_gid)
-          : base_type(base_type::stub_type::create_sync(target_gid))
+        explicit cancelable_action(hpx::naming::id_type const& target_gid)
+          : base_type(stub_type::create_async(target_gid))
         {}
 
         ///////////////////////////////////////////////////////////////////////
         void do_it(hpx::error_code& ec = hpx::throws)
         {
-            BOOST_ASSERT(this->gid_);
-            this->base_type::do_it(this->gid_, ec);
+            HPX_ASSERT(this->get_id());
+            this->base_type::do_it(this->get_id(), ec);
         }
 
         void cancel_it()
         {
-            BOOST_ASSERT(this->gid_);
-            this->base_type::cancel_it(this->gid_);
+            HPX_ASSERT(this->get_id());
+            this->base_type::cancel_it(this->get_id());
         }
     };
 }
 
-#endif
 

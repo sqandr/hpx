@@ -1,10 +1,11 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2015 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/util/static.hpp>
+#include <hpx/config.hpp>
+#include <hpx/static_reinit/reinitializable_static.hpp>
 #include <hpx/runtime/components/server/console_error_sink_singleton.hpp>
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -14,7 +15,8 @@ namespace hpx { namespace components { namespace server
 
     console_error_dispatcher& get_error_dispatcher()
     {
-        util::static_<console_error_dispatcher, error_dispatcher_tag> disp;
+        util::reinitializable_static<console_error_dispatcher,
+            error_dispatcher_tag> disp;
         return disp.get();
     }
 }}}

@@ -1,7 +1,8 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser, Richard D Guidry Jr.
+//  Copyright (c) 2007-2017 Hartmut Kaiser, Richard D Guidry Jr.
 //  Copyright (c) 2011 Vinay C Amatya
 //  Copyright (c) 2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
@@ -10,10 +11,17 @@
 
 #include <hpx/hpx.hpp>
 #include <hpx/hpx_init.hpp>
+#include <hpx/include/util.hpp>
+
+#include <cstddef>
+#include <iostream>
+#include <list>
+#include <string>
+#include <vector>
 
 #include "nqueen.hpp"
 
-int hpx_main(boost::program_options::variables_map&)
+int hpx_main(hpx::program_options::variables_map&)
 {
     const std::size_t default_size = 8;
 
@@ -34,11 +42,11 @@ int hpx_main(boost::program_options::variables_map&)
             soln_count_total = 0;
             std::string arg;
             std::cin >> arg;
-            std::size_t sz = boost::lexical_cast<std::size_t>(arg);
+            std::size_t sz = hpx::util::from_string<std::size_t>(arg);
 
             std::size_t i = 0;
             std::list<nqueen::board> b;
-            nqueen::board bi;
+            nqueen::board bi = hpx::new_<nqueen::board>(locality_);
             while(i != sz)
             {
                 b.push_back(bi);
@@ -61,7 +69,7 @@ int hpx_main(boost::program_options::variables_map&)
         else if(cmd == "default")
         {
             soln_count_total = 0;
-            nqueen::board a;
+            nqueen::board a = hpx::new_<nqueen::board>(locality_);
             std::size_t i = 0;
             std::vector<nqueen::board> b;
             while(i != default_size)
@@ -106,8 +114,5 @@ int hpx_main(boost::program_options::variables_map&)
 
 int main(int argc, char* argv[])
 {
-    boost::program_options::options_description
-        desc_commandline("Usage: " HPX_APPLICATION_STRING " [options]");
-
-    return hpx::init(desc_commandline, argc, argv);
+    return hpx::init(argc, argv);
 }

@@ -1,23 +1,25 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 #include <hpx/hpx.hpp>
 #include <hpx/include/util.hpp>
 #include <hpx/include/performance_counters.hpp>
+#include <hpx/runtime_local/startup_function.hpp>
 
-#include <boost/format.hpp>
-#include <boost/foreach.hpp>
+#include <cstdint>
 
 #include "server/sine.hpp"
 
 ///////////////////////////////////////////////////////////////////////////////
-// Add factory registration functionality
-HPX_REGISTER_COMPONENT_MODULE();    // create entry point for component factory
+// Add factory registration functionality, We register the module dynamically
+// as no executable links against it.
+HPX_REGISTER_COMPONENT_MODULE_DYNAMIC();
 
 ///////////////////////////////////////////////////////////////////////////////
-typedef hpx::components::managed_component<
+typedef hpx::components::component<
     ::performance_counters::sine::server::sine_counter
 > sine_counter_type;
 
@@ -26,22 +28,22 @@ namespace performance_counters { namespace sine
 {
     ///////////////////////////////////////////////////////////////////////////
     // This function will be invoked whenever the implicit counter is queried.
-    boost::int64_t immediate_sine()
+    std::int64_t immediate_sine(bool reset)
     {
-        static boost::uint64_t started_at =
+        static std::uint64_t started_at =
             hpx::util::high_resolution_clock::now();
 
-        boost::uint64_t up_time =
+        std::uint64_t up_time =
             hpx::util::high_resolution_clock::now() - started_at;
-        return boost::int64_t(std::sin(up_time / 1e10) * 100000.);
+        return std::int64_t(std::sin(up_time / 1e10) * 100000.);
     }
 
     ///////////////////////////////////////////////////////////////////////////
     // This will be called to return special command line options supported by
     // this component.
-    boost::program_options::options_description command_line_options()
+    hpx::program_options::options_description command_line_options()
     {
-        boost::program_options::options_description opts(
+        hpx::program_options::options_description opts(
             "Additional command line options for the sine component");
         opts.add_options()
             ("sine", "enables the performance counters implemented by the "
@@ -55,8 +57,8 @@ namespace performance_counters { namespace sine
     // counters need to be created.
     bool need_perf_counters()
     {
-        using boost::program_options::options_description;
-        using boost::program_options::variables_map;
+        using hpx::program_options::options_description;
+        using hpx::program_options::variables_map;
         using hpx::util::retrieve_commandline_arguments;
 
         // Retrieve command line using the Boost.ProgramOptions library.
@@ -71,7 +73,7 @@ namespace performance_counters { namespace sine
 
         // We enable the performance counters if --sine is specified on the
         // command line.
-        return (vm.count("sine") != 0) ? true : false;
+        return vm.count("sine") != 0;
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -81,8 +83,8 @@ namespace performance_counters { namespace sine
     // function has been registered with.
     bool explicit_sine_counter_discoverer(
         hpx::performance_counters::counter_info const& info,
-        HPX_STD_FUNCTION<hpx::performance_counters::discover_counter_func> const& f,
-        hpx::error_code& ec)
+        hpx::performance_counters::discover_counter_func const& f,
+        hpx::performance_counters::discover_counters_mode mode, hpx::error_code& ec)
     {
         hpx::performance_counters::counter_info i = info;
 
@@ -92,26 +94,42 @@ namespace performance_counters { namespace sine
             get_counter_path_elements(info.fullname_, p, ec);
         if (!status_is_valid(status)) return false;
 
-        p.parentinstancename_ = "locality#<*>";
-        p.parentinstanceindex_ = -1;
-        p.instancename_ = "instance#<*>";
-        p.instanceindex_ = -1;
+        if (mode == hpx::performance_counters::discover_counters_minimal ||
+            p.parentinstancename_.empty() || p.instancename_.empty())
+        {
+            if (p.parentinstancename_.empty())
+            {
+                p.parentinstancename_ = "locality#*";
+                p.parentinstanceindex_ = -1;
+            }
 
-        status = get_counter_name(p, i.fullname_, ec);
-        if (!status_is_valid(status) || !f(i, ec) || ec)
+            if (p.instancename_.empty())
+            {
+                p.instancename_ = "instance#*";
+                p.instanceindex_ = -1;
+            }
+
+            status = get_counter_name(p, i.fullname_, ec);
+            if (!status_is_valid(status) || !f(i, ec) || ec)
+                return false;
+        }
+        else if(p.instancename_ == "instance#*") {
+            HPX_ASSERT(mode == hpx::performance_counters::discover_counters_full);
+
+            // FIXME: expand for all instances
+            p.instancename_ = "instance";
+            p.instanceindex_ = 0;
+            status = get_counter_name(p, i.fullname_, ec);
+            if (!status_is_valid(status) || !f(i, ec) || ec)
+                return false;
+        }
+        else if (!f(i, ec) || ec) {
             return false;
-
-//         boost::uint32_t last_locality = hpx::get_num_localities();
-//         for (boost::uint32_t l = 0; l <= last_locality; ++l)
-//         {
-//             p.parentinstanceindex_ = static_cast<boost::int32_t>(l);
-//             status = get_counter_name(p, i.fullname_, ec);
-//             if (!status_is_valid(status) || !f(i, ec) || ec)
-//                 return false;
-//         }
+        }
 
         if (&ec != &hpx::throws)
             ec = hpx::make_success_code();
+
         return true;    // everything is ok
     }
 
@@ -147,7 +165,7 @@ namespace performance_counters { namespace sine
             try {
                 // create the 'sine' performance counter component locally, we
                 // only get here if this instance does not exist yet
-                id = hpx::components::server::create_one<sine_counter_type>(
+                id = hpx::components::server::construct<sine_counter_type>(
                         complemented_info);
             }
             catch (hpx::exception const& e) {
@@ -171,11 +189,13 @@ namespace performance_counters { namespace sine
     ///////////////////////////////////////////////////////////////////////////
     // This function will be registered as a startup function for HPX below.
     //
-    // That means it will be executed in a px-thread before hpx_main, but after
+    // That means it will be executed in a HPX-thread before hpx_main, but after
     // the runtime has been initialized and started.
     void startup()
     {
         using namespace hpx::performance_counters;
+        using hpx::util::placeholders::_1;
+        using hpx::util::placeholders::_2;
 
         // define the counter types
         generic_counter_type_data const counter_types[] =
@@ -193,7 +213,8 @@ namespace performance_counters { namespace sine
               // instance number to use for the particular counter. We allow
               // any arbitrary number of instances.
               &explicit_sine_counter_creator,
-              &explicit_sine_counter_discoverer
+              &explicit_sine_counter_discoverer,
+              ""
             },
             { "/sine/immediate/implicit", counter_raw,
               "returns the current value of a sine wave calculated over "
@@ -206,9 +227,10 @@ namespace performance_counters { namespace sine
               // where '<locality_id>' is the number of the locality the
               // counter has to be instantiated on. The function 'immediate_sine'
               // is used as the source of counter data for the created counter.
-              boost::bind(&hpx::performance_counters::locality_raw_counter_creator,
+              hpx::util::bind(&hpx::performance_counters::locality_raw_counter_creator,
                   _1, &immediate_sine, _2),
-              &hpx::performance_counters::locality_counter_discoverer
+              &hpx::performance_counters::locality_counter_discoverer,
+              ""
             }
         };
 
@@ -219,11 +241,18 @@ namespace performance_counters { namespace sine
     }
 
     ///////////////////////////////////////////////////////////////////////////
-    bool get_startup(HPX_STD_FUNCTION<void()>& startup_func)
+    bool get_startup(hpx::startup_function_type& startup_func, bool& pre_startup)
     {
+        // exit silently if this gets loaded outside of the sine_client example
+        if (hpx::get_config_entry("hpx.components.sine.enabled", "0") == "0")
+        {
+            return false;
+        }
+
         // check whether the performance counters need to be enabled
-        if (!need_perf_counters()) {
-            HPX_THROW_EXCEPTION(hpx::component_load_failure,
+        if (!need_perf_counters())
+        {
+            HPX_THROW_EXCEPTION(hpx::dynamic_link_failure,
                 "performance_counters::sine::get_startup",
                 "the sine component is not enabled on the commandline "
                 "(--sine), bailing out");
@@ -231,24 +260,25 @@ namespace performance_counters { namespace sine
         }
 
         // return our startup-function if performance counters are required
-        startup_func = startup;
+        startup_func = startup;   // function to run during startup
+        pre_startup = true;       // run 'startup' as pre-startup function
         return true;
     }
 }}
 
 ///////////////////////////////////////////////////////////////////////////////
-// Register a startup function which will be called as a px-thread during
+// Register a startup function which will be called as a HPX-thread during
 // runtime startup. We use this function to register our performance counter
 // type and performance counter instances.
 //
 // Note that this macro can be used not more than once in one module.
-HPX_REGISTER_STARTUP_MODULE(::performance_counters::sine::get_startup);
+HPX_REGISTER_STARTUP_MODULE_DYNAMIC(::performance_counters::sine::get_startup);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Register a function to be called to populate the special command line
 // options supported by this component.
 //
 // Note that this macro can be used not more than once in one module.
-HPX_REGISTER_COMMANDLINE_MODULE(
+HPX_REGISTER_COMMANDLINE_MODULE_DYNAMIC(
     ::performance_counters::sine::command_line_options);
 

@@ -1,4 +1,4 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2014 Hartmut Kaiser
 //  Copyright (c)      2012 Thomas Heller
 //  Copyright (c)      2012 Bryce Adelstein-Lelbach
 //
@@ -9,24 +9,30 @@
 //  http://timday.bitbucket.org/lru.html
 //  Copyright (c) 2010-2011 Tim Day
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_UTIL_CONNECTION_CACHE_MAY_20_0104PM)
-#define HPX_UTIL_CONNECTION_CACHE_MAY_20_0104PM
+#pragma once
 
-#include <map>
+#include <hpx/config.hpp>
+#include <hpx/assert.hpp>
+#include <hpx/datastructures/tuple.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/synchronization/spinlock.hpp>
+#include <hpx/modules/logging.hpp>
+#include <hpx/util/get_and_reset_value.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <list>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
-
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/exception.hpp>
-#include <hpx/util/logging.hpp>
-
-#include <boost/assert.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/thread.hpp>
+#include <utility>
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace hpx { namespace util
@@ -39,14 +45,17 @@ namespace hpx { namespace util
     class connection_cache
     {
     public:
-        typedef boost::recursive_mutex mutex_type;
+        typedef hpx::lcos::local::spinlock mutex_type;
 
-        typedef boost::shared_ptr<Connection> connection_type;
+        typedef std::shared_ptr<Connection> connection_type;
         typedef std::deque<connection_type> value_type;
         typedef Key key_type;
         typedef std::list<key_type> key_tracker_type;
-        typedef boost::tuple<
-            value_type, std::size_t, typename key_tracker_type::iterator
+        typedef util::tuple<
+            value_type,                 // cached (available) connections
+            std::size_t,                // number of existing connections
+            std::size_t,                // max number of cached connections
+            typename key_tracker_type::iterator     // reference into LRU list
         > cache_value_type;
         typedef std::map<key_type, cache_value_type> cache_type;
         typedef typename cache_type::size_type size_type;
@@ -56,8 +65,15 @@ namespace hpx { namespace util
           , size_type max_connections_per_locality
         )
           : max_connections_(max_connections < 2 ? 2 : max_connections)
-          , max_connections_per_locality_(max_connections_per_locality)
+          , max_connections_per_locality_(
+                max_connections_per_locality < 2 ? 2 : max_connections_per_locality)
           , connections_(0)
+          , shutting_down_(false)
+          , insertions_(0)
+          , evictions_(0)
+          , hits_(0)
+          , misses_(0)
+          , reclaims_(0)
         {
             if (max_connections_per_locality_ > max_connections_)
             {
@@ -68,6 +84,92 @@ namespace hpx { namespace util
             }
         }
 
+        void shutdown()
+        {
+            shutting_down_ = true;
+        }
+
+    private:
+        static value_type&
+        cached_connections(cache_value_type& entry)
+        {
+            return util::get<0>(entry);
+        }
+        static value_type const&
+        cached_connections(cache_value_type const& entry)
+        {
+            return util::get<0>(entry);
+        }
+
+        static std::size_t&
+        num_existing_connections(cache_value_type& entry)
+        {
+            return util::get<1>(entry);
+        }
+        static std::size_t const&
+        num_existing_connections(cache_value_type const& entry)
+        {
+            return util::get<1>(entry);
+        }
+
+        static std::size_t&
+        max_num_connections(cache_value_type& entry)
+        {
+            return util::get<2>(entry);
+        }
+        static std::size_t const&
+        max_num_connections(cache_value_type const& entry)
+        {
+            return util::get<2>(entry);
+        }
+
+        static typename key_tracker_type::iterator&
+        lru_reference(cache_value_type& entry)
+        {
+            return util::get<3>(entry);
+        }
+        static typename key_tracker_type::iterator const&
+        lru_reference(cache_value_type const& entry)
+        {
+            return util::get<3>(entry);
+        }
+
+        ///////////////////////////////////////////////////////////////////////
+        // Increase the per-locality and overall connection counts.
+        void increment_connection_count(cache_value_type& e)
+        {
+            std::size_t& num_connections = num_existing_connections(e);
+            ++num_connections;
+            ++connections_;
+
+            // If appropriate, update the maximum number of allowed cached
+            // connections.
+            std::size_t& max_connections = max_num_connections(e);
+            if (num_connections > max_connections * 2)
+            {
+                max_connections = static_cast<std::size_t>(
+                    static_cast<double>(max_connections) * 1.5);
+            }
+        }
+
+        // Decrease the per-locality and overall connection counts.
+        void decrement_connection_count(cache_value_type& e)
+        {
+            std::size_t& num_connections = num_existing_connections(e);
+            --num_connections;
+            --connections_;
+
+            // If appropriate, update the maximum number of allowed
+            // cached connections.
+            std::size_t& max_connections = max_num_connections(e);
+            if (num_connections < max_connections / 2)
+            {
+                max_connections = static_cast<std::size_t>(
+                    static_cast<double>(max_connections) / 1.5);
+            }
+        }
+
+    public:
         /// Try to get a connection to \a l from the cache.
         ///
         /// \returns A usable connection to \a l if a connection could be
@@ -77,7 +179,7 @@ namespace hpx { namespace util
         ///          \a reclaim().
         connection_type get(key_type const& l)
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
 
             // Check if this key already exists in the cache.
             typename cache_type::iterator const it = cache_.find(l);
@@ -91,22 +193,25 @@ namespace hpx { namespace util
                 key_tracker_.splice(
                     key_tracker_.end()
                   , key_tracker_
-                  , boost::get<2>(it->second)
+                  , lru_reference(it->second)
                 );
 
                 // If connections to the locality are available in the cache,
                 // remove the oldest one and return it.
-                if (!boost::get<0>(it->second).empty())
+                if (!cached_connections(it->second).empty())
                 {
-                    connection_type result = boost::get<0>(it->second).front();
-                    boost::get<0>(it->second).pop_front();
+                    value_type& connections = cached_connections(it->second);
+                    connection_type result = connections.front();
+                    connections.pop_front();
 
+                    ++hits_;
                     check_invariants();
                     return result;
                 }
             }
 
             // If we get here then the item is not in the cache.
+            ++misses_;
             check_invariants();
             return connection_type();
         }
@@ -122,12 +227,16 @@ namespace hpx { namespace util
         ///          true. If a connection could not be found and space could
         ///          not be returned, \a conn is unmodified and this function
         ///          returns false.
+        ///          If force_insert is true, a new connection entry will be
+        ///          created even if that means the cache limits will be
+        ///          exceeded.
         ///
         /// \note    The connection must be returned to the cache by calling
         ///          \a reclaim().
-        bool get_or_reserve(key_type const& l, connection_type& conn)
+        bool get_or_reserve(key_type const& l, connection_type& conn,
+            bool force_insert = false)
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
 
             typename cache_type::iterator const it = cache_.find(l);
 
@@ -140,16 +249,21 @@ namespace hpx { namespace util
                 key_tracker_.splice(
                     key_tracker_.end()
                   , key_tracker_
-                  , boost::get<2>(it->second)
+                  , lru_reference(it->second)
                 );
 
                 // If connections to the locality are available in the cache,
                 // remove the oldest one and return it.
-                if (!boost::get<0>(it->second).empty())
+                if (!cached_connections(it->second).empty())
                 {
-                    conn = boost::get<0>(it->second).front();
-                    boost::get<0>(it->second).pop_front();
+                    value_type& connections = cached_connections(it->second);
+                    conn = connections.front();
+                    connections.pop_front();
 
+#if defined(HPX_TRACK_STATE_OF_OUTGOING_TCP_CONNECTION)
+                    conn->set_state(Connection::state_reinitialized);
+#endif
+                    ++hits_;
                     check_invariants();
                     return true;
                 }
@@ -157,12 +271,24 @@ namespace hpx { namespace util
                 // Otherwise, if we have less connections for this locality
                 // than the maximum, try to reserve space in the cache for a new
                 // connection.
-                if (boost::get<1>(it->second) < max_connections_per_locality_)
+                if (num_existing_connections(it->second) <
+                    max_num_connections(it->second) ||
+                    force_insert)
                 {
                     // See if we have enough space or can make space available.
-                    // If we can't find or make space, give up.
-                    if (!free_space())
+
+                    // Note that if we don't have any space and there are no
+                    // outstanding connections for this locality, we grow the
+                    // cache size beyond its limit (hoping that it will be
+                    // reduced in size next time some connection is handed back
+                    // to the cache).
+
+                    if (!free_space() &&
+                        num_existing_connections(it->second) != 0 &&
+                        !force_insert)
                     {
+                        // If we can't find or make space, give up.
+                        ++misses_;
                         check_invariants();
                         return false;
                     }
@@ -172,9 +298,10 @@ namespace hpx { namespace util
                     conn.reset();
 
                     // Increase the per-locality and overall connection counts.
-                    ++boost::get<1>(it->second);
-                    ++connections_;
+                    increment_connection_count(it->second);
 
+                    // Statistics
+                    ++insertions_;
                     check_invariants();
                     return true;
                 }
@@ -182,26 +309,32 @@ namespace hpx { namespace util
                 // We've reached the maximum number of connections for this
                 // locality, and none of them are checked into the cache, so
                 // we have to give up.
+                ++misses_;
                 check_invariants();
                 return false;
             }
 
-            // Key isn't in cache.
+            // Key (locality) isn't in cache.
 
             // See if we have enough space or can make space available.
-            // If we can't find or make space, give up.
-            if (!free_space())
-            {
-                check_invariants();
-                return false;
-            }
+
+            // Note that we ignore the outcome of free_space() here as we have
+            // to guarantee to have space for the new connection as there are
+            // no connections outstanding for this locality. If free_space
+            // fails we grow the cache size beyond its limit (hoping that it
+            // will be reduced in size next time some connection is handed back
+            // to the cache).
+            free_space();
 
             // Update LRU meta data.
             typename key_tracker_type::iterator kt =
                 key_tracker_.insert(key_tracker_.end(), l);
 
-            cache_.insert(
-                std::make_pair(l, boost::make_tuple(value_type(), 1, kt)));
+            cache_.insert(std::make_pair(
+                l, util::make_tuple(
+                    value_type(), 1, max_connections_per_locality_, kt
+                ))
+            );
 
             // Make sure the input connection shared_ptr doesn't hold anything.
             conn.reset();
@@ -209,6 +342,7 @@ namespace hpx { namespace util
             // Increase the overall connection counts.
             ++connections_;
 
+            ++insertions_;
             check_invariants();
             return true;
         }
@@ -219,35 +353,63 @@ namespace hpx { namespace util
         ///       a prior call to \a get() or \a get_or_reserve().
         void reclaim(key_type const& l, connection_type const& conn)
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
 
             // Search for an entry for this key.
             typename cache_type::iterator const ct = cache_.find(l);
 
-            // Key should already exist in the cache. FIXME: This should
-            // probably throw as could easily be triggered by caller error.
-            BOOST_ASSERT(ct != cache_.end());
-
-            // Update LRU meta data.
-            key_tracker_.splice(
-                key_tracker_.end()
-              , key_tracker_
-              , boost::get<2>(ct->second)
+            if (ct != cache_.end()) {
+                // Update LRU meta data.
+                key_tracker_.splice(
+                    key_tracker_.end()
+                  , key_tracker_
+                  , lru_reference(ct->second)
                 );
 
-            // Add the connection to the entry.
-            boost::get<0>(ct->second).push_back(conn);
+                // Return the connection back to the cache only if the number
+                // of connections does not need to be shrunk.
+                if (num_existing_connections(ct->second) <=
+                    max_num_connections(ct->second))
+                {
+                    // Add the connection to the entry.
+                    cached_connections(ct->second).push_back(conn);
 
-            // FIXME: Again, this should probably throw instead of asserting,
-            // as invariants could be invalidated here due to caller error.
-            check_invariants();
+                    ++reclaims_;
+
+#if defined(HPX_TRACK_STATE_OF_OUTGOING_TCP_CONNECTION)
+                    conn->set_state(Connection::state_reclaimed);
+#endif
+                }
+                else
+                {
+                    // Adjust the number of existing connections for this key.
+                    decrement_connection_count(ct->second);
+
+                    // do the accounting
+                    ++evictions_;
+
+                    // the connection itself will go out of scope on return
+#if defined(HPX_TRACK_STATE_OF_OUTGOING_TCP_CONNECTION)
+                    conn->set_state(Connection::state_deleting);
+#endif
+                }
+
+                // FIXME: Again, this should probably throw instead of asserting,
+                // as invariants could be invalidated here due to caller error.
+                check_invariants();
+            }
+//             else {
+//                 // Key should already exist in the cache. FIXME: This should
+//                 // probably throw as could easily be triggered by caller error.
+//                 HPX_ASSERT(shutting_down_);
+//             }
         }
 
         /// Returns true if the overall connection count is equal to or larger
         /// than the maximum number of overall connections, and false otherwise.
         bool full() const
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
             return (connections_ >= max_connections_);
         }
 
@@ -255,35 +417,42 @@ namespace hpx { namespace util
         /// than the maximum connection count per locality, and false otherwise.
         bool full(key_type const& l) const
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
 
             if (!cache_.count(l))
                 return false || (connections_ >= max_connections_);
 
             typename cache_type::const_iterator ct = cache_.find(l);
-            BOOST_ASSERT(ct != cache_.end());
-            return (boost::get<1>(ct->second) >= max_connections_per_locality_)
+            HPX_ASSERT(ct != cache_.end());
+            return (num_existing_connections(ct->second) >=
+                    max_num_connections(ct->second))
                 || (connections_ >= max_connections_);
         }
 
         /// Destroys all connections in the cache, and resets all counts.
         ///
         /// \note Calling this function while connections are still checked out
-        ///       of the cache is a bad idea, and will violate this classes
+        ///       of the cache is a bad idea, and will violate this class'
         ///       invariants.
         void clear()
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
             key_tracker_.clear();
             cache_.clear();
             connections_ = 0;
+
+            insertions_ = 0;
+            evictions_ = 0;
+            hits_ = 0;
+            misses_ = 0;
+            reclaims_ = 0;
 
             // FIXME: This should probably throw instead of asserting, as it
             // can be triggered by caller error.
             check_invariants();
         }
 
-        /// Destroys all connections for the give locality in the cache, reset
+        /// Destroys all connections for the given locality in the cache, reset
         /// all associated counts.
         ///
         /// \note Calling this function while connections are still checked out
@@ -291,17 +460,19 @@ namespace hpx { namespace util
         ///       invariants.
         void clear(key_type const& l)
         {
-            mutex_type::scoped_lock lock(mtx_);
+            std::lock_guard<mutex_type> lock(mtx_);
 
             // Check if this key already exists in the cache.
-            typename cache_type::iterator const it = cache_.find(l);
+            typename cache_type::iterator it = cache_.find(l);
             if (it != cache_.end())
             {
                 // Remove from LRU meta data.
-                key_tracker_.erase(boost::get<2>(it->second));
+                key_tracker_.erase(lru_reference(it->second));
 
                 // correct counter to avoid assertions later on
-                connections_ -= boost::get<1>(it->second);
+                std::size_t num_existing = num_existing_connections(it->second);
+                connections_ -= num_existing;
+                evictions_ += num_existing;
 
                 // Erase entry if key exists in the cache.
                 cache_.erase(it);
@@ -310,6 +481,62 @@ namespace hpx { namespace util
             // FIXME: This should probably throw instead of asserting, as it
             // can be triggered by caller error.
             check_invariants();
+        }
+
+        /// Destroys all connections for the given locality in the cache, reset
+        /// all associated counts.
+        void clear(key_type const& l, connection_type const& conn)
+        {
+            std::lock_guard<mutex_type> lock(mtx_);
+
+            // Check if this key already exists in the cache.
+            typename cache_type::iterator const it = cache_.find(l);
+            if (it != cache_.end())
+            {
+                // Adjust the number of existing connections for this key.
+                decrement_connection_count(it->second);
+
+                // do the accounting
+                ++evictions_;
+
+                // the connection itself will go out of scope on return
+#if defined(HPX_TRACK_STATE_OF_OUTGOING_TCP_CONNECTION)
+                conn->set_state(Connection::state_deleting);
+#endif
+            }
+
+            check_invariants();
+        }
+
+        // access statistics
+        std::int64_t get_cache_insertions(bool reset)
+        {
+            std::lock_guard<mutex_type> lock(mtx_);
+            return util::get_and_reset_value(insertions_, reset);
+        }
+
+        std::int64_t get_cache_evictions(bool reset)
+        {
+            std::lock_guard<mutex_type> lock(mtx_);
+            return util::get_and_reset_value(evictions_, reset);
+        }
+
+        std::int64_t get_cache_hits(bool reset)
+        {
+            std::lock_guard<mutex_type> lock(mtx_);
+            return util::get_and_reset_value(hits_, reset);
+        }
+
+        std::int64_t get_cache_misses(bool reset)
+        {
+            std::lock_guard<mutex_type> lock(mtx_);
+            return util::get_and_reset_value(misses_, reset);
+        }
+
+        std::int64_t get_cache_reclaims(bool reset)
+        {
+            std::lock_guard<mutex_type> lock(mtx_);
+            return util::get_and_reset_value(reclaims_, reset);
         }
 
     private:
@@ -325,33 +552,29 @@ namespace hpx { namespace util
             {
                 cache_value_type const& val = ct->second;
 
-                // The separate item counter has to properly count all the
-                // existing the elements, not only those in the cache entry.
-                BOOST_ASSERT(boost::get<0>(val).size() <= boost::get<1>(val));
+                std::size_t num_connections = cached_connections(val).size();
+                std::size_t num_existing = num_existing_connections(val);
 
-                // The overall number of connections in each entry (for each
-                // locality) should not be larger than the allowed number.
-                BOOST_ASSERT(boost::get<1>(val) <= max_connections_per_locality_);
+                // The separate item counter has to properly count all the
+                // existing elements, not only those in the cache entry.
+                HPX_ASSERT(num_connections <= num_existing);
 
                 // Count all connections (both those in the cache and those
                 // checked out of the cache).
-                in_cache_count += boost::get<0>(val).size();
-                total_count += boost::get<1>(val);
+                in_cache_count += num_connections;
+                total_count += num_existing;
             }
 
             // Overall connection count should be larger than or equal to the
             // number of entries in the cache.
-            BOOST_ASSERT(in_cache_count <= connections_);
+            HPX_ASSERT(in_cache_count <= connections_);
 
             // Overall connection count should be equal to the sum of connection
             // counts for all localities.
-            BOOST_ASSERT(total_count == connections_);
-
-            // Check that we do not hold too many elements.
-            BOOST_ASSERT(connections_ <= max_connections_);
+            HPX_ASSERT(total_count == connections_);
 
             // The list of key trackers should have the same size as the cache.
-            BOOST_ASSERT(key_tracker_.size() == cache_.size());
+            HPX_ASSERT(key_tracker_.size() == cache_.size());
 #endif
         }
 
@@ -371,43 +594,43 @@ namespace hpx { namespace util
 
             while (connections_ >= max_connections_)
             {
-                // Find the least recent used keys data.
-                const typename cache_type::iterator ct = cache_.find(*kt);
-                BOOST_ASSERT(ct != cache_.end());
+                // Find the least recently used keys data.
+                typename cache_type::iterator ct = cache_.find(*kt);
+                HPX_ASSERT(ct != cache_.end());
 
                 // If the entry is empty, ignore it and try the next least
                 // recently used entry.
-                if (boost::get<0>(ct->second).empty())
+                if (cached_connections(ct->second).empty())
                 {
                     // Remove the key if its connection count is zero.
-                    if (0 == boost::get<1>(ct->second))
-                    {
+                    if (0 == num_existing_connections(ct->second)) {
                         cache_.erase(ct);
                         key_tracker_.erase(kt);
                         kt = key_tracker_.begin();
                     }
-
-                    else
+                    else {
                         // REVIEW: Should we reorder key_tracker_ to speed up
                         // the eviction?
                         ++kt;
+                    }
 
                     // If we've gone through key_tracker_ and haven't found
-                    // anything evictable, then all the entries must be checked
-                    // out.
+                    // anything evict-able, then all the entries must be
+                    // currently checked out.
                     if (key_tracker_.end() == kt)
                         return false;
-                    else
-                        continue;
+
+                    continue;
                 }
 
                 // Remove the oldest connection.
-                boost::get<0>(ct->second).pop_front();
+                cached_connections(ct->second).pop_front();
 
                 // Adjust the overall and per-locality connection count.
-                --boost::get<1>(ct->second);
-                --connections_;
-                break;
+                decrement_connection_count(ct->second);
+
+                // Statistics
+                ++evictions_;
             }
 
             return true;
@@ -419,7 +642,14 @@ namespace hpx { namespace util
         key_tracker_type key_tracker_;
         cache_type cache_;
         size_type connections_;
+        bool shutting_down_;
+
+        // statistics support
+        std::int64_t insertions_;
+        std::int64_t evictions_;
+        std::int64_t hits_;
+        std::int64_t misses_;
+        std::int64_t reclaims_;
     };
 }}
 
-#endif

@@ -1,5 +1,6 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
@@ -12,7 +13,7 @@
 // is guaranteed to be executed before hpx_main() is invoked.
 //
 // The HPX API function retrieve_commandline_arguments() demonstrated below
-// expectes 2 arguments: a) an options_description object describing any
+// expects 2 arguments: a) an options_description object describing any
 // special options to be recognized by this component and b) a variables_map
 // object which on return will be initialized with all found command line
 // options and arguments passed while invoking the application on the locality
@@ -24,9 +25,12 @@
 // would not be executed by the runtime system.
 
 #include <hpx/hpx.hpp>
-#include <hpx/util/parse_command_line.hpp>
+#include <hpx/modules/runtime_local.hpp>
+#include <hpx/include/util.hpp>
 
-#include <boost/program_options.hpp>
+#include <hpx/modules/program_options.hpp>
+
+#include <iostream>
 
 ///////////////////////////////////////////////////////////////////////////////
 // Add factory registration functionality
@@ -41,8 +45,8 @@ namespace startup_shutdown
     // after the runtime has been initialized and started.
     void startup()
     {
-        using boost::program_options::options_description;
-        using boost::program_options::variables_map;
+        using hpx::program_options::options_description;
+        using hpx::program_options::variables_map;
 
         options_description desc_commandline("startup_shutdown_component");
         desc_commandline.add_options()
@@ -65,9 +69,10 @@ namespace startup_shutdown
     }
 
     ///////////////////////////////////////////////////////////////////////////
-    bool get_startup(HPX_STD_FUNCTION<void()>& startup_func)
+    bool get_startup(hpx::startup_function_type& startup_func, bool& pre_startup)
     {
         startup_func = startup;     // return our startup-function
+        pre_startup = true;         // run 'startup' as pre-startup function
         return true;
     }
 }

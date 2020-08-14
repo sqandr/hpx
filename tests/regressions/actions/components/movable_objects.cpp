@@ -1,12 +1,15 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
+#include <hpx/hpx.hpp>
 #include <hpx/include/serialization.hpp>
 
-#include <tests/regressions/actions/components/movable_objects.hpp>
+#include <cstddef>
+
+#include "movable_objects.hpp"
 
 namespace hpx { namespace test
 {
@@ -25,25 +28,25 @@ namespace hpx { namespace test
     }
 
     // Move constructor.
-    movable_object::movable_object(BOOST_RV_REF(movable_object)) {}
+    movable_object::movable_object(movable_object &&) {}
 
     movable_object::~movable_object() {}
 
     // Copy assignment.
     movable_object& movable_object::operator=(
-        BOOST_COPY_ASSIGN_REF(movable_object))
+        movable_object const &)
     {
         ++count;
         return *this;
     }
 
     // Move assignment.
-    movable_object& movable_object::operator=(BOOST_RV_REF(movable_object))
+    movable_object& movable_object::operator=(movable_object &&)
     {
         return *this;
     }
 
-    std::size_t movable_object::get_count() const
+    std::size_t movable_object::get_count()
     {
         return count;
     }
@@ -61,11 +64,11 @@ namespace hpx { namespace test
 
     template HPX_COMPONENT_EXPORT
     void movable_object::serialize(
-        util::portable_binary_oarchive&, const unsigned int);
+        serialization::output_archive&, const unsigned int);
 
     template HPX_COMPONENT_EXPORT
     void movable_object::serialize(
-        util::portable_binary_iarchive&, const unsigned int);
+        serialization::input_archive&, const unsigned int);
 
     ///////////////////////////////////////////////////////////////////////////
     std::size_t non_movable_object::count = 0;
@@ -90,7 +93,7 @@ namespace hpx { namespace test
         return *this;
     }
 
-    std::size_t non_movable_object::get_count() const
+    std::size_t non_movable_object::get_count()
     {
         return count;
     }
@@ -101,18 +104,26 @@ namespace hpx { namespace test
     }
 
     template <typename Archive>
-    void non_movable_object::serialize(Archive& ar, const unsigned int)
+    void non_movable_object::save(Archive& ar, const unsigned int) const
     {
         ar & count;
     }
 
     template HPX_COMPONENT_EXPORT
-    void non_movable_object::serialize(
-        util::portable_binary_oarchive&, const unsigned int);
+    void non_movable_object::save(
+        serialization::output_archive&, const unsigned int) const;
+
+    template <typename Archive>
+    void non_movable_object::load(Archive& ar, const unsigned int)
+    {
+        std::size_t tmp = 0;
+        ar & tmp;
+        count += tmp;
+    }
 
     template HPX_COMPONENT_EXPORT
-    void non_movable_object::serialize(
-        util::portable_binary_iarchive&, const unsigned int);
+    void non_movable_object::load(
+        serialization::input_archive&, const unsigned int);
 }}
 
 

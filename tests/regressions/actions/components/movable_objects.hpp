@@ -1,18 +1,28 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_TEST_ACTION_MOVE_SEMANTICS_FEB_23_2012_0947AM)
-#define HPX_TEST_ACTION_MOVE_SEMANTICS_FEB_23_2012_0947AM
+#pragma once
 
-#include <boost/move/move.hpp>
-#include <boost/ref.hpp>
+#include <hpx/config.hpp>
+#include <hpx/serialization/access.hpp>
+
+#include <cstddef>
 
 namespace hpx { namespace test
 {
+    // This base class is there to void the is_pod optimization
+    // during serialization to make the move semantic tests more meaningful
+    struct HPX_COMPONENT_EXPORT object_base
+    {
+        virtual ~object_base() {};
+    };
+
     ///////////////////////////////////////////////////////////////////////////
     class HPX_COMPONENT_EXPORT movable_object
+        : object_base
     {
         static std::size_t count;
 
@@ -23,28 +33,29 @@ namespace hpx { namespace test
         movable_object(movable_object const& other);
 
         // Move constructor.
-        movable_object(BOOST_RV_REF(movable_object) other);
+        movable_object(movable_object && other);
 
         ~movable_object();
 
         // Copy assignment.
-        movable_object& operator=(BOOST_COPY_ASSIGN_REF(movable_object) other);
+        movable_object& operator=(movable_object const & other);
 
         // Move assignment.
-        movable_object& operator=(BOOST_RV_REF(movable_object) other);
+        movable_object& operator=(movable_object && other);
 
-        std::size_t get_count() const;
+        static std::size_t get_count();
         void reset_count();
 
         template <typename Archive>
         void serialize(Archive& ar, const unsigned int);
 
     private:
-        BOOST_COPYABLE_AND_MOVABLE(movable_object)
+
     };
 
     ///////////////////////////////////////////////////////////////////////////
     class HPX_COMPONENT_EXPORT non_movable_object
+        : object_base
     {
         static std::size_t count;
 
@@ -59,13 +70,17 @@ namespace hpx { namespace test
         // Copy assignment.
         non_movable_object& operator=(non_movable_object const& other);
 
-        std::size_t get_count() const;
+        static std::size_t get_count();
         void reset_count();
 
         template <typename Archive>
-        void serialize(Archive& ar, const unsigned int);
+        void load(Archive& ar, const unsigned int);
+
+        template <typename Archive>
+        void save(Archive& ar, const unsigned int) const;
+
+        HPX_SERIALIZATION_SPLIT_MEMBER()
     };
 }}
 
-#endif
 

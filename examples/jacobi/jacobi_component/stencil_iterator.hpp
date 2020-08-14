@@ -1,16 +1,18 @@
 
 //  Copyright (c) 2012 Thomas Heller
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#ifndef JACOBI_STENCIL_ITERATOR_HPP
-#define JACOBI_STENCIL_ITERATOR_HPP
+#pragma once
 
 #include "row_range.hpp"
 
 #include <hpx/include/naming.hpp>
 #include <hpx/include/lcos.hpp>
+
+#include <cstddef>
 
 namespace jacobi
 {
@@ -20,7 +22,7 @@ namespace jacobi
     {
         stencil_iterator() {}
 
-        ~stencil_iterator() { BOOST_ASSERT(id); }
+        ~stencil_iterator() { /*HPX_ASSERT(id);*/ }
 
         hpx::lcos::future<void> init(
             jacobi::row const & r
@@ -29,11 +31,12 @@ namespace jacobi
           , std::size_t ny_
           , std::size_t l
         );
-        hpx::lcos::future<void> setup_boundary(stencil_iterator const & top, stencil_iterator const & bottom);
+        hpx::lcos::future<void> setup_boundary(stencil_iterator const & top,
+            stencil_iterator const & bottom);
 
         hpx::lcos::future<void> step();
 
-        hpx::lcos::future<row_range> get_range(std::size_t begin, std::size_t end);
+        hpx::lcos::future<jacobi::row> get(std::size_t idx) const;
 
         template <typename Archive>
         void serialize(Archive & ar, unsigned)
@@ -45,4 +48,3 @@ namespace jacobi
     };
 }
 
-#endif

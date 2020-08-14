@@ -1,6 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c) 2012 Andrew Kemp
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
@@ -10,11 +11,10 @@
 #include <hpx/include/util.hpp>
 #include <hpx/include/lcos.hpp>
 
-#include <iostream>
 #include <fstream>
-#include <vector>
+#include <iostream>
 #include <string>
-#include <boost/algorithm/string.hpp>
+#include <vector>
 
 std::vector<std::string> words;
 
@@ -36,7 +36,7 @@ std::string search(int start, int end, std::string const &word)
         //just a quick check, because the list is not perfectly symmetrical
         {
             int pos = mid/2;
-            
+
             int size;
             //if our value is lower than start, we disregard it.
             if (word.length() >= check.length())
@@ -47,7 +47,7 @@ std::string search(int start, int end, std::string const &word)
             bool sub = true;
             for (int i = 0; i < size; i++)
             {
-                char check_char = tolower(check[i]);
+                char check_char = static_cast<char>(tolower(check[i]));
                 char word_char = word[i];
                 if (word_char != check_char)
                 {
@@ -79,7 +79,7 @@ std::string search(int start, int end, std::string const &word)
         size = word.length();
     for (int i = 0; i < size; i++)
     {
-        char check_char = tolower(check[i]);
+        char check_char = static_cast<char>(tolower(check[i]));
         char word_char = word[i];
         if (check_char != word_char)
         {
@@ -96,14 +96,13 @@ std::string search(int start, int end, std::string const &word)
 }
 int hpx_main()
 {
-    
     {
         using namespace std;
         ifstream fin;
         string path = __FILE__;
         string wordlist_path;
         string remove = "spell_check_file.cpp";
-        for (int i = 0; i < path.length() - remove.length(); i++)
+        for (string::size_type i = 0; i < path.length() - remove.length(); i++)
         {
             wordlist_path.push_back(path[i]);
             if (path[i] == '\\')
@@ -111,12 +110,13 @@ int hpx_main()
                 wordlist_path.push_back(path[i]);
             }
         }
-        //list of American English words in alphabetical order. Provided by Kevin at http://wordlist.sourceforge.net/
-        
+        // list of American English words in alphabetical order.
+        // Provided by Kevin at http://wordlist.sourceforge.net/
+
         string word;
         cout << "Loading file: example_text.txt\n";
         hpx::util::high_resolution_timer t;
-        
+
         int fileLines = 0;;
         std::string example_path = wordlist_path + "example_text.txt";
         fin.open(example_path);
@@ -126,7 +126,7 @@ int hpx_main()
             while (fin.good())
             {
                 fin >> temp;
-                for (int i = 0; i < temp.size(); ++i)
+                for (string::size_type i = 0; i < temp.size(); ++i)
                     word.push_back(temp[i]);
                 word.push_back(' ');
                 fileLines++;
@@ -142,12 +142,12 @@ int hpx_main()
         vector<string> strs;
         {
             vector<string> temp;
-            boost::split(temp, word, boost::is_any_of("\n\t -"));
-            for (int i = 0; i < temp.size(); i++)
+            hpx::string_util::split(temp, word, hpx::string_util::is_any_of("\n\t -"));
+            for (string::size_type i = 0; i < temp.size(); i++)
             {
                 bool isContraction = false;
                 string holder;
-                for (int j = 0; j < temp[i].size(); j++)
+                for (string::size_type j = 0; j < temp[i].size(); j++)
                 {
                     //a size check to avoid errors
                     if (temp[i].size() - j - 1 == 2)
@@ -162,7 +162,7 @@ int hpx_main()
                     }
                     //remove any garbage characters
                     if (toupper(temp[i][j]) >= 'A' && toupper(temp[i][j]) <= 'Z')
-                        holder.push_back(tolower(temp[i][j]));
+                        holder.push_back(static_cast<char>(tolower(temp[i][j])));
                 }
                 if (holder.size() > 0)
                 {
@@ -183,8 +183,8 @@ int hpx_main()
             while (fin.good())
             {
                 getline(fin, temp);
-                for (int i = 0; i < temp.length(); i++)
-                temp[i] = tolower(temp[i]);
+                for (string::size_type i = 0; i < temp.length(); i++)
+                temp[i] = static_cast<char>(tolower(temp[i]));
                 words.push_back(temp);
                 wordcount++;
             }
@@ -202,11 +202,11 @@ int hpx_main()
             using hpx::async;
             using hpx::wait_all;
             vector<search_action> sAct;//[sizeX * sizeY];
-            vector<future<string>> wordRun;
+            vector<future<string> > wordRun;
             wordRun.reserve(strs.size());
-            for (int i = 0; i < strs.size(); ++i)
+            for (string::size_type i = 0; i < strs.size(); ++i)
             {
-                string& single = strs[i]; 
+                string& single = strs[i];
                 int start = 0;
                 hpx::naming::id_type const locality_id = hpx::find_here();
                 search_action temp;
@@ -216,7 +216,7 @@ int hpx_main()
             }
             wait_all(wordRun);
             cout << "Search completed in " << t.elapsed() << "s.\n";
-            for (int i = 0; i < strs.size(); i++)
+            for (string::size_type i = 0; i < strs.size(); i++)
             {
                 string get = wordRun[i].get();
                 if (get.size() > 0)

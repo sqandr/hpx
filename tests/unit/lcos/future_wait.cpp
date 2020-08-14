@@ -1,32 +1,35 @@
 ////////////////////////////////////////////////////////////////////////////////
-//  Copyright (c) 2012 Bryce Adelstein-Lelbach 
-// 
-//  Distributed under the Boost Software License, Version 1.0. (See accompanying 
+//  Copyright (c) 2012 Bryce Adelstein-Lelbach
+//
+//  SPDX-License-Identifier: BSL-1.0
+//  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
 #include <hpx/hpx_init.hpp>
+#include <hpx/include/threads.hpp>
 #include <hpx/include/actions.hpp>
 #include <hpx/include/async.hpp>
-#include <hpx/lcos/future_wait.hpp>
-#include <hpx/util/lightweight_test.hpp>
+#include <hpx/async_combinators/wait_each.hpp>
+#include <hpx/modules/testing.hpp>
 
-#include <boost/atomic.hpp>
-#include <boost/lexical_cast.hpp>
+#include <atomic>
+#include <cstddef>
+#include <string>
+#include <vector>
 
-using boost::program_options::variables_map;
-using boost::program_options::options_description;
-using boost::program_options::value;
+using hpx::program_options::variables_map;
+using hpx::program_options::options_description;
+using hpx::program_options::value;
 
 using hpx::init;
 using hpx::finalize;
 
 using hpx::util::report_errors;
 
-using hpx::actions::plain_action0;
-using hpx::actions::plain_result_action0;
+using hpx::actions::action;
 
-using hpx::lcos::wait;
+using hpx::lcos::wait_each;
 using hpx::async;
 using hpx::lcos::future;
 
@@ -38,54 +41,44 @@ using hpx::naming::id_type;
 struct callback
 {
   private:
-    mutable std::size_t calls_;
+    mutable std::atomic<std::size_t> * calls_;
 
   public:
-    callback() : calls_(0) {} 
+    callback(std::atomic<std::size_t> & calls) : calls_(&calls) {}
 
     template <
         typename T
     >
     void operator()(
-        std::size_t 
-      , T const& 
+        T const&
         ) const
     {
-        ++calls_;
-    }
-
-    void operator()(
-        std::size_t 
-        ) const
-    {
-        ++calls_;
+        ++(*calls_);
     }
 
     std::size_t count() const
     {
-        return calls_;
+        return *calls_;
     }
 
     void reset()
     {
-        calls_ = 0;
-    } 
+        calls_->store(0);
+    }
 };
 
 ///////////////////////////////////////////////////////////////////////////////
-boost::atomic<std::size_t> void_counter; 
+std::atomic<std::size_t> void_counter;
 
 void null_thread()
 {
     ++void_counter;
 }
 
-typedef plain_action0<null_thread> null_action;
-
-HPX_REGISTER_PLAIN_ACTION(null_action);
+HPX_PLAIN_ACTION(null_thread, null_action);
 
 ///////////////////////////////////////////////////////////////////////////////
-boost::atomic<std::size_t> result_counter; 
+std::atomic<std::size_t> result_counter;
 
 bool null_result_thread()
 {
@@ -93,9 +86,7 @@ bool null_result_thread()
     return true;
 }
 
-typedef plain_result_action0<bool, null_result_thread> null_result_action;
-
-HPX_REGISTER_PLAIN_ACTION(null_result_action);
+HPX_PLAIN_ACTION(null_result_thread, null_result_action);
 
 ///////////////////////////////////////////////////////////////////////////////
 int hpx_main(
@@ -103,7 +94,8 @@ int hpx_main(
     )
 {
     {
-        callback cb;
+        std::atomic<std::size_t> count(0);
+        callback cb(count);
 
         ///////////////////////////////////////////////////////////////////////
         HPX_SANITY_EQ(0U, cb.count());
@@ -122,7 +114,7 @@ int hpx_main(
         ///////////////////////////////////////////////////////////////////////
         // Async wait, single future, void return.
         {
-            wait(async<null_action>(here_), cb);
+            wait_each(cb, async<null_action>(here_));
 
             HPX_TEST_EQ(1U, cb.count());
             HPX_TEST_EQ(1U, void_counter.load());
@@ -134,7 +126,7 @@ int hpx_main(
         ///////////////////////////////////////////////////////////////////////
         // Async wait, single future, non-void return.
         {
-            wait(async<null_result_action>(here_), cb);
+            wait_each(cb, async<null_result_action>(here_));
 
             HPX_TEST_EQ(1U, cb.count());
             HPX_TEST_EQ(1U, result_counter.load());
@@ -152,7 +144,7 @@ int hpx_main(
             for (std::size_t i = 0; i < 64; ++i)
                 futures.push_back(async<null_action>(here_));
 
-            wait(futures, cb);
+            wait_each(cb, futures);
 
             HPX_TEST_EQ(64U, cb.count());
             HPX_TEST_EQ(64U, void_counter.load());
@@ -170,7 +162,7 @@ int hpx_main(
             for (std::size_t i = 0; i < 64; ++i)
                 futures.push_back(async<null_result_action>(here_));
 
-            wait(futures, cb);
+            wait_each(cb, futures);
 
             HPX_TEST_EQ(64U, cb.count());
             HPX_TEST_EQ(64U, result_counter.load());
@@ -180,104 +172,41 @@ int hpx_main(
         }
 
         ///////////////////////////////////////////////////////////////////////
-        // Sync wait, single future, void return.
+        // Async wait, single future, deferred.
         {
-            wait(async<null_action>(here_));
+            wait_each(cb, async(hpx::launch::deferred, &null_thread));
 
+            HPX_TEST_EQ(1U, cb.count());
             HPX_TEST_EQ(1U, void_counter.load());
 
+            cb.reset();
             void_counter.store(0);
         }
 
         ///////////////////////////////////////////////////////////////////////
-        // Sync wait, single future, non-void return.
-        {
-            HPX_TEST_EQ(true, wait(async<null_result_action>(here_)));
-            HPX_TEST_EQ(1U, result_counter.load());
-
-            result_counter.store(0);
-        }
-
-        ///////////////////////////////////////////////////////////////////////
-        // Sync wait, multiple futures, void return.
-        {
-            wait(async<null_action>(here_)
-               , async<null_action>(here_)
-               , async<null_action>(here_));
-
-            HPX_TEST_EQ(3U, void_counter.load());
-
-            void_counter.store(0);
-        }
-
-        ///////////////////////////////////////////////////////////////////////
-        // Sync wait, multiple futures, non-void return.
-        {
-            boost::tuple<bool, bool, bool> r 
-                = wait(async<null_result_action>(here_)
-                     , async<null_result_action>(here_)
-                     , async<null_result_action>(here_));
-
-            HPX_TEST_EQ(true, boost::get<0>(r));
-            HPX_TEST_EQ(true, boost::get<1>(r));
-            HPX_TEST_EQ(true, boost::get<2>(r));
-            HPX_TEST_EQ(3U, result_counter.load());
-
-            result_counter.store(0);
-        }
-
-        ///////////////////////////////////////////////////////////////////////
-        // Sync wait, vector of futures, void return.
+        // Async wait, vector of futures, deferred.
         {
             std::vector<future<void> > futures;
             futures.reserve(64);
 
             for (std::size_t i = 0; i < 64; ++i)
-                futures.push_back(async<null_action>(here_));
+            {
+                if (i % 3)
+                {
+                    futures.push_back(async(hpx::launch::async, &null_thread));
+                }
+                else
+                {
+                    futures.push_back(async(hpx::launch::deferred, &null_thread));
+                }
+            }
+            wait_each(cb, futures);
 
-            wait(futures);
-
+            HPX_TEST_EQ(64U, cb.count());
             HPX_TEST_EQ(64U, void_counter.load());
 
+            cb.reset();
             void_counter.store(0);
-        }
-
-        ///////////////////////////////////////////////////////////////////////
-        // Sync wait, vector of futures, non-void return.
-        {
-            std::vector<future<bool> > futures;
-            futures.reserve(64);
-
-            std::vector<bool> values;
-            values.reserve(64);
-
-            for (std::size_t i = 0; i < 64; ++i)
-                futures.push_back(async<null_result_action>(here_));
-
-            wait(futures, values);
-
-            HPX_TEST_EQ(64U, result_counter.load());
-
-            for (std::size_t i = 0; i < 64; ++i)
-                HPX_TEST_EQ(true, values[i]);
-
-            result_counter.store(0); 
-        }
-
-        ///////////////////////////////////////////////////////////////////////
-        // Sync wait, vector of futures, non-void return ignored.
-        {
-            std::vector<future<bool> > futures;
-            futures.reserve(64);
-
-            for (std::size_t i = 0; i < 64; ++i)
-                futures.push_back(async<null_result_action>(here_));
-
-            wait(futures);
-
-            HPX_TEST_EQ(64U, result_counter.load());
-
-            result_counter.store(0);
         }
     }
 
@@ -296,12 +225,10 @@ int main(
     options_description cmdline("usage: " HPX_APPLICATION_STRING " [options]");
 
     // We force this test to use several threads by default.
-    using namespace boost::assign;
-    std::vector<std::string> cfg;
-    cfg += "hpx.os_threads=" +
-        boost::lexical_cast<std::string>(hpx::threads::hardware_concurrency());
+    std::vector<std::string> const cfg = {
+        "hpx.os_threads=all"
+    };
 
     // Initialize and run HPX
     return hpx::init(cmdline, argc, argv, cfg);
 }
-

@@ -1,36 +1,34 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_THROTTLE_SERVER_AUG_09_2011_0702PM)
-#define HPX_THROTTLE_SERVER_AUG_09_2011_0702PM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/lcos/future.hpp>
-#include <hpx/lcos/local/mutex.hpp>
-#include <hpx/runtime/actions/component_action.hpp>
-#include <hpx/runtime/components/server/simple_component_base.hpp>
+#include <hpx/hpx.hpp>
+#include <hpx/include/actions.hpp>
+#include <hpx/include/components.hpp>
+#include <hpx/future.hpp>
+#include <hpx/mutex.hpp>
 
 #include <boost/dynamic_bitset.hpp>
+
+#include <cstddef>
 
 namespace throttle { namespace server
 {
     ///////////////////////////////////////////////////////////////////////////
     class HPX_COMPONENT_EXPORT throttle
-      : public hpx::components::simple_component_base<throttle>
+      : public hpx::components::component_base<throttle>
     {
     private:
-        typedef hpx::components::simple_component_base<throttle> base_type;
+        typedef hpx::components::component_base<throttle> base_type;
         typedef hpx::lcos::local::mutex mutex_type;
 
     public:
         throttle();
         ~throttle();
-
-        // components must contain a typedef for wrapping_type defining the
-        // component type used to encapsulate instances of this component
-        typedef throttle wrapping_type;
 
         ///////////////////////////////////////////////////////////////////////
         // parcel action code: the action to be performed on the destination
@@ -50,20 +48,9 @@ namespace throttle { namespace server
         // Each of the exposed functions needs to be encapsulated into an action
         // type, allowing to generate all required boilerplate code for threads,
         // serialization, etc.
-        typedef hpx::actions::action1<
-            throttle, throttle_suspend, std::size_t,
-            &throttle::suspend, hpx::threads::thread_priority_critical
-        > suspend_action;
-
-        typedef hpx::actions::action1<
-            throttle, throttle_resume, std::size_t,
-            &throttle::resume, hpx::threads::thread_priority_critical
-        > resume_action;
-
-        typedef hpx::actions::result_action1<
-            throttle const, bool, throttle_is_suspended, std::size_t,
-            &throttle::is_suspended, hpx::threads::thread_priority_critical
-        > is_suspended_action;
+        HPX_DEFINE_COMPONENT_ACTION(throttle, suspend, suspend_action);
+        HPX_DEFINE_COMPONENT_ACTION(throttle, resume, resume_action);
+        HPX_DEFINE_COMPONENT_ACTION(throttle, is_suspended, is_suspended_action);
 
     private:
         // this function is periodically scheduled as a worker thread with the
@@ -81,14 +68,18 @@ namespace throttle { namespace server
     };
 }}
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_ACTION_HAS_CRITICAL_PRIORITY(throttle::server::throttle::suspend_action);
+HPX_REGISTER_ACTION_DECLARATION(
     throttle::server::throttle::suspend_action
   , throttle_suspend_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+
+HPX_ACTION_HAS_CRITICAL_PRIORITY(throttle::server::throttle::resume_action);
+HPX_REGISTER_ACTION_DECLARATION(
     throttle::server::throttle::resume_action
   , throttle_resume_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+
+HPX_ACTION_HAS_CRITICAL_PRIORITY(throttle::server::throttle::is_suspended_action);
+HPX_REGISTER_ACTION_DECLARATION(
     throttle::server::throttle::is_suspended_action
   , throttle_is_suspended_action);
 
-#endif

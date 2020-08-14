@@ -1,34 +1,38 @@
 //  Copyright (c) 2011 Bryce Adelstein-Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 #include <hpx/hpx_init.hpp>
-#include <hpx/include/iostreams.hpp>
-#include <hpx/util/lightweight_test.hpp>
-#include <hpx/runtime/applier/applier.hpp>
+#include <hpx/iostream.hpp>
+#include <hpx/modules/testing.hpp>
+#include <hpx/async_distributed/applier/applier.hpp>
 #include <hpx/include/plain_actions.hpp>
 #include <hpx/include/async.hpp>
 
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/assign/std/vector.hpp>
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <vector>
 
-#include <tests/unit/agas/components/simple_refcnt_checker.hpp>
-#include <tests/unit/agas/components/managed_refcnt_checker.hpp>
+#include "components/simple_refcnt_checker.hpp"
+#include "components/managed_refcnt_checker.hpp"
 
-using boost::program_options::variables_map;
-using boost::program_options::options_description;
-using boost::program_options::value;
+using hpx::program_options::variables_map;
+using hpx::program_options::options_description;
+using hpx::program_options::value;
 
 using hpx::init;
 using hpx::finalize;
 using hpx::find_here;
 
-using boost::posix_time::milliseconds;
+using std::chrono::milliseconds;
 
 using hpx::naming::id_type;
 using hpx::naming::get_management_type_name;
 using hpx::naming::get_locality_id_from_id;
+using hpx::naming::detail::get_credit_from_gid;
 
 using hpx::components::component_type;
 using hpx::components::get_component_type;
@@ -36,8 +40,6 @@ using hpx::components::get_component_type;
 using hpx::applier::get_applier;
 
 using hpx::agas::garbage_collect;
-
-using hpx::actions::plain_action3;
 
 using hpx::async;
 
@@ -53,23 +55,14 @@ using hpx::find_here;
 void split(
     id_type const& from
   , id_type const& target
-  , boost::uint16_t old_credit
+  , std::int64_t old_credit
     );
 
-typedef plain_action3<
-    // Arguments.
-    id_type const&
-  , id_type const&
-  , boost::uint16_t
-    // Function.
-  , split
-> split_action;
-
-HPX_REGISTER_PLAIN_ACTION(split_action);
+HPX_PLAIN_ACTION(split);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Helper functions.
-inline boost::uint32_t get_credit(id_type const& id)
+inline std::int64_t get_credit(id_type const& id)
 {
     return get_credit_from_gid(id.get_gid());
 }
@@ -78,7 +71,7 @@ inline boost::uint32_t get_credit(id_type const& id)
 void split(
     id_type const& from
   , id_type const& target
-  , boost::uint16_t old_credit
+  , std::int64_t old_credit
     )
 {
     cout << "[" << find_here() << "/" << target << "]: "
@@ -93,8 +86,10 @@ void split(
     id_type const here = find_here();
 
     if (get_locality_id_from_id(from) == get_locality_id_from_id(here))
+    {
         throw std::logic_error("infinite recursion detected, split was "
                                "invoked locally");
+    }
 
     // Recursively call split on the sender locality.
     async<split_action>(from, here, target, get_credit(target)).get();
@@ -110,7 +105,7 @@ void hpx_test_main(
     variables_map& vm
     )
 {
-    boost::uint64_t const delay = vm["delay"].as<boost::uint64_t>();
+    std::uint64_t const delay = vm["delay"].as<std::uint64_t>();
 
     typedef typename Client::server_type server_type;
 
@@ -125,7 +120,7 @@ void hpx_test_main(
     Client monitor(here);
 
     {
-        id_type id = monitor.detach();
+        id_type id = monitor.detach().get();
 
         cout << "id: " << id << " "
              << get_management_type_name(id.get_management_type()) << "\n"
@@ -140,11 +135,13 @@ void hpx_test_main(
     }
 
     // Flush pending reference counting operations.
+    garbage_collect();
     garbage_collect(remote_localities[0]);
     garbage_collect();
+    garbage_collect(remote_localities[0]);
 
     // The component should be out of scope now.
-    HPX_TEST_EQ(true, monitor.ready(milliseconds(delay)));
+    HPX_TEST_EQ(true, monitor.is_ready(milliseconds(delay)));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -181,15 +178,15 @@ int main(
 
     cmdline.add_options()
         ( "delay"
-        , value<boost::uint64_t>()->default_value(1000)
+        , value<std::uint64_t>()->default_value(1000)
         , "number of milliseconds to wait for object destruction")
         ;
 
     // We need to explicitly enable the test components used by this test.
-    using namespace boost::assign;
-    std::vector<std::string> cfg;
-    cfg += "hpx.components.simple_refcnt_checker.enabled = 1";
-    cfg += "hpx.components.managed_refcnt_checker.enabled = 1";
+    std::vector<std::string> const cfg = {
+        "hpx.components.simple_refcnt_checker.enabled! = 1",
+        "hpx.components.managed_refcnt_checker.enabled! = 1"
+    };
 
     // Initialize and run HPX.
     return init(cmdline, argc, argv, cfg);

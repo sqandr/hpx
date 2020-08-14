@@ -1,345 +1,166 @@
 //  Copyright (c) 2007-2008 Anshul Tandon
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //  Copyright (c) 2011      Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/exception.hpp>
+#include <hpx/config.hpp>
+
+#include <hpx/assert.hpp>
+#include <hpx/execution_base/register_locks.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/runtime_local/runtime_local.hpp>
 #include <hpx/runtime/threads/thread_helpers.hpp>
-#include <hpx/runtime/applier/applier.hpp>
-#include <hpx/include/parcelset.hpp>
+#include <hpx/modules/threadmanager.hpp>
+#include <hpx/util/thread_description.hpp>
+
+#include <hpx/async_distributed/applier/applier.hpp>
+#include <hpx/components_base/pinned_ptr.hpp>
+#include <hpx/runtime/actions/continuation.hpp>
 #include <hpx/runtime/agas/interface.hpp>
-#include <hpx/runtime/threads/threadmanager.hpp>
-#include <hpx/runtime/components/server/runtime_support.hpp>
-#include <hpx/util/register_locks.hpp>
-#include <hpx/include/async.hpp>
+#include <hpx/runtime/naming/resolver_client.hpp>
+#include <hpx/runtime/parcelset/parcel.hpp>
+#include <hpx/runtime/parcelset/parcelhandler.hpp>
+#include <hpx/runtime/runtime_fwd.hpp>
+#include <hpx/runtime_distributed.hpp>
 
-///////////////////////////////////////////////////////////////////////////////
-namespace hpx { namespace applier
-{
-    //
-    lcos::future<naming::id_type, naming::gid_type>
-    create_async(naming::id_type const& targetgid,
-        components::component_type type, std::size_t count)
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <sstream>
+#include <utility>
+#include <vector>
+
+namespace hpx { namespace applier {
+#if defined(HPX_HAVE_NETWORKING)
+    applier::applier(parcelset::parcelhandler& ph, threads::threadmanager& tm)
+      : parcel_handler_(ph)
+      , thread_manager_(tm)
     {
-        // Create a future, execute the required action,
-        // we simply return the initialized future, the caller needs
-        // to call get() on the return value to obtain the result
-        typedef
-            components::server::runtime_support::create_component_action
-        action_type;
-        return hpx::async<action_type>(targetgid, type, count);
     }
-
-    //
-    naming::id_type create(naming::id_type const& targetgid,
-        components::component_type type, std::size_t count)
+#else
+    applier::applier(threads::threadmanager& tm)
+      : thread_manager_(tm)
     {
-        return create_async(targetgid, type, count).get();
     }
+#endif
 
-    ///////////////////////////////////////////////////////////////////////////
-    static inline threads::thread_state_enum thread_function(
-        HPX_STD_FUNCTION<void(threads::thread_state_ex_enum)> const& func)
+    void applier::initialize(std::uint64_t rts)
     {
-        // execute the actual thread function
-        func(threads::wait_signaled);
-
-        // Verify that there are no more registered locks for this
-        // OS-thread. This will throw if there are still any locks
-        // held.
-        util::force_error_on_lock();
-
-        return threads::terminated;
+        naming::resolver_client& agas_client = get_agas_client();
+        runtime_support_id_ =
+            naming::id_type(agas_client.get_local_locality().get_msb(), rts,
+                naming::id_type::unmanaged);
     }
-
-    static inline threads::thread_state_enum thread_function_nullary(
-        HPX_STD_FUNCTION<void()> const& func)
-    {
-        // execute the actual thread function
-        func();
-
-        // Verify that there are no more registered locks for this
-        // OS-thread. This will throw if there are still any locks
-        // held.
-        util::force_error_on_lock();
-
-        return threads::terminated;
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    threads::thread_id_type register_thread_nullary(
-        BOOST_RV_REF(HPX_STD_FUNCTION<void()>) func, char const* desc,
-        threads::thread_state_enum state, bool run_now,
-        threads::thread_priority priority, std::size_t os_thread, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_thread_nullary",
-                "global applier object is not accessible");
-            return threads::invalid_thread_id;
-        }
-
-        threads::thread_init_data data(
-            HPX_STD_BIND(&thread_function_nullary, boost::move(func)),
-            desc ? desc : "<unknown>", 0, priority, os_thread);
-        return app->get_thread_manager().
-            register_thread(data, state, run_now, ec);
-    }
-
-    threads::thread_id_type register_thread(
-        BOOST_RV_REF(HPX_STD_FUNCTION<void(threads::thread_state_ex_enum)>) func,
-        char const* desc, threads::thread_state_enum state, bool run_now,
-        threads::thread_priority priority, std::size_t os_thread, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_thread",
-                "global applier object is not accessible");
-            return threads::invalid_thread_id;
-        }
-
-        threads::thread_init_data data(
-            HPX_STD_BIND(&thread_function, boost::move(func)),
-            desc ? desc : "<unknown>", 0, priority, os_thread);
-        return app->get_thread_manager().
-            register_thread(data, state, run_now, ec);
-    }
-
-    threads::thread_id_type register_thread_plain(
-        BOOST_RV_REF(HPX_STD_FUNCTION<threads::thread_function_type>) func,
-        char const* desc, threads::thread_state_enum state, bool run_now,
-        threads::thread_priority priority, std::size_t os_thread, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_thread_plain",
-                "global applier object is not accessible");
-            return threads::invalid_thread_id;
-        }
-
-        threads::thread_init_data data(
-            boost::move(func), desc ? desc : "<unknown>", 0, priority, os_thread);
-        return app->get_thread_manager().
-            register_thread(data, state, run_now, ec);
-    }
-
-    threads::thread_id_type register_thread_plain(
-        threads::thread_init_data& data, threads::thread_state_enum state,
-        bool run_now, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_thread_plain",
-                "global applier object is not accessible");
-            return threads::invalid_thread_id;
-        }
-
-        return app->get_thread_manager().
-            register_thread(data, state, run_now, ec);
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    void register_work_nullary(
-        BOOST_RV_REF(HPX_STD_FUNCTION<void()>) func, char const* desc,
-        threads::thread_state_enum state, threads::thread_priority priority,
-        std::size_t os_thread, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_work_nullary",
-                "global applier object is not accessible");
-            return;
-        }
-
-        threads::thread_init_data data(
-            HPX_STD_BIND(&thread_function_nullary, boost::move(func)),
-            desc ? desc : "<unknown>", 0, priority, os_thread);
-        app->get_thread_manager().register_work(data, state, ec);
-    }
-
-    void register_work(
-        BOOST_RV_REF(HPX_STD_FUNCTION<void(threads::thread_state_ex_enum)>) func,
-        char const* desc, threads::thread_state_enum state,
-        threads::thread_priority priority, std::size_t os_thread, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_work",
-                "global applier object is not accessible");
-            return;
-        }
-
-        threads::thread_init_data data(
-            HPX_STD_BIND(&thread_function, boost::move(func)),
-            desc ? desc : "<unknown>", 0, priority, os_thread);
-        app->get_thread_manager().register_work(data, state, ec);
-    }
-
-    void register_work_plain(
-        BOOST_RV_REF(HPX_STD_FUNCTION<threads::thread_function_type>) func,
-        char const* desc, naming::address::address_type lva,
-        threads::thread_state_enum state, threads::thread_priority priority,
-        std::size_t os_thread, error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_work_plain",
-                "global applier object is not accessible");
-            return;
-        }
-
-        threads::thread_init_data data(boost::move(func),
-            desc ? desc : "<unknown>", lva, priority, os_thread);
-        app->get_thread_manager().register_work(data, state, ec);
-    }
-
-    void register_work_plain(
-        threads::thread_init_data& data, threads::thread_state_enum state,
-        error_code& ec)
-    {
-        hpx::applier::applier* app = hpx::applier::get_applier_ptr();
-        if (NULL == app)
-        {
-            HPX_THROWS_IF(ec, invalid_status,
-                "hpx::applier::register_work_plain",
-                "global applier object is not accessible");
-            return;
-        }
-
-        app->get_thread_manager().register_work(data, state, ec);
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    hpx::util::thread_specific_ptr<applier*, applier::tls_tag> applier::applier_;
-
-    applier::applier(parcelset::parcelhandler &ph, threads::threadmanager_base& tm,
-                boost::uint64_t rts, boost::uint64_t mem)
-      : parcel_handler_(ph), thread_manager_(tm),
-        runtime_support_id_(parcel_handler_.get_locality().get_msb(),
-            rts, naming::id_type::unmanaged),
-        memory_id_(parcel_handler_.get_locality().get_msb(),
-            mem, naming::id_type::unmanaged)
-    {}
 
     naming::resolver_client& applier::get_agas_client()
     {
         return hpx::naming::get_agas_client();
     }
 
+#if defined(HPX_HAVE_NETWORKING)
     parcelset::parcelhandler& applier::get_parcel_handler()
     {
         return parcel_handler_;
     }
+#endif
 
-    threads::threadmanager_base& applier::get_thread_manager()
+    threads::threadmanager& applier::get_thread_manager()
     {
         return thread_manager_;
     }
 
-    naming::locality const& applier::here() const
+    naming::gid_type const& applier::get_raw_locality(error_code& ec) const
     {
-        return hpx::get_locality();
+        return hpx::naming::get_agas_client().get_local_locality(ec);
     }
 
-    naming::gid_type const& applier::get_raw_locality() const
+    std::uint32_t applier::get_locality_id(error_code& ec) const
     {
-        return hpx::naming::get_agas_client().local_locality();
+        return naming::get_locality_id_from_gid(get_raw_locality(ec));
     }
 
-    boost::uint32_t applier::get_locality_id() const
+    bool applier::get_raw_remote_localities(
+        std::vector<naming::gid_type>& prefixes,
+        components::component_type type, error_code& ec) const
     {
-        return naming::get_locality_id_from_gid(get_raw_locality());
-    }
-
-    bool applier::get_raw_remote_localities(std::vector<naming::gid_type>& prefixes,
-        components::component_type type) const
-    {
-        return parcel_handler_.get_raw_remote_localities(prefixes, type);
+#if defined(HPX_HAVE_NETWORKING)
+        return parcel_handler_.get_raw_remote_localities(prefixes, type, ec);
+#else
+        return true;
+#endif
     }
 
     bool applier::get_remote_localities(std::vector<naming::id_type>& prefixes,
-        components::component_type type) const
+        components::component_type type, error_code& ec) const
     {
+#if defined(HPX_HAVE_NETWORKING)
         std::vector<naming::gid_type> raw_prefixes;
-        if (!parcel_handler_.get_raw_remote_localities(raw_prefixes, type))
+        if (!parcel_handler_.get_raw_remote_localities(raw_prefixes, type, ec))
             return false;
 
-        BOOST_FOREACH(naming::gid_type& gid, raw_prefixes)
-            prefixes.push_back(naming::id_type(gid, naming::id_type::unmanaged));
-
+        for (naming::gid_type& gid : raw_prefixes)
+            prefixes.emplace_back(gid, naming::id_type::unmanaged);
+#endif
         return true;
     }
 
     bool applier::get_raw_localities(std::vector<naming::gid_type>& prefixes,
         components::component_type type) const
     {
+#if defined(HPX_HAVE_NETWORKING)
         return parcel_handler_.get_raw_localities(prefixes, type);
+#else
+        naming::gid_type id;
+        naming::get_agas_client().get_console_locality(id);
+        prefixes.emplace_back(id);
+        return true;
+#endif
     }
 
-    bool applier::get_localities(std::vector<naming::id_type>& prefixes,
-        components::component_type type) const
+    bool applier::get_localities(
+        std::vector<naming::id_type>& prefixes, error_code& ec) const
     {
         std::vector<naming::gid_type> raw_prefixes;
-        if (!parcel_handler_.get_raw_localities(raw_prefixes, type))
+#if defined(HPX_HAVE_NETWORKING)
+        if (!parcel_handler_.get_raw_localities(
+                raw_prefixes, components::component_invalid, ec))
             return false;
 
-        BOOST_FOREACH(naming::gid_type& gid, raw_prefixes)
-            prefixes.push_back(naming::id_type(gid, naming::id_type::unmanaged));
-
+        for (naming::gid_type& gid : raw_prefixes)
+            prefixes.emplace_back(gid, naming::id_type::unmanaged);
+#else
+        prefixes.emplace_back(agas::get_console_locality());
+#endif
         return true;
     }
 
-    // parcel forwarding.
-    bool applier::route(parcelset::parcel const& p)
+    bool applier::get_localities(std::vector<naming::id_type>& prefixes,
+        components::component_type type, error_code& ec) const
     {
-        return get_agas_client().route_parcel(p);
-    }
+#if defined(HPX_HAVE_NETWORKING)
+        std::vector<naming::gid_type> raw_prefixes;
+        if (!parcel_handler_.get_raw_localities(raw_prefixes, type, ec))
+            return false;
 
-    void applier::init_tss()
-    {
-        BOOST_ASSERT(NULL == applier::applier_.get());    // shouldn't be initialized yet
-        applier::applier_.reset(new applier* (this));
-    }
-
-    void applier::deinit_tss()
-    {
-        applier::applier_.reset();
+        for (naming::gid_type& gid : raw_prefixes)
+            prefixes.emplace_back(gid, naming::id_type::unmanaged);
+#else
+        prefixes.emplace_back(agas::get_console_locality());
+#endif
+        return true;
     }
 
     applier& get_applier()
     {
-        BOOST_ASSERT(NULL != applier::applier_.get());   // should have been initialized
-        return **applier::applier_;
+        return hpx::get_runtime_distributed().get_applier();
     }
 
     applier* get_applier_ptr()
     {
-        applier** appl = applier::applier_.get();
-        return appl ? *appl : NULL;
+        return &hpx::get_runtime_distributed().get_applier();
     }
-
-    // The function \a get_locality_id returns the id of this locality
-    boost::uint32_t get_locality_id()
-    {
-        applier** appl = applier::applier_.get();
-        return appl ? (*appl)->get_locality_id() : naming::invalid_locality_id;
-    }
-}}
-
+}}    // namespace hpx::applier

@@ -1,6 +1,7 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //  2012 Matt Anderson
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
@@ -9,11 +10,16 @@
 #include <hpx/include/actions.hpp>
 #include <hpx/include/components.hpp>
 #include <hpx/include/lcos.hpp>
+#include <hpx/include/util.hpp>
 
 #include <boost/dynamic_bitset.hpp>
 
+#include <cstddef>
 #include <cstdlib>
 #include <ctime>
+#include <iostream>
+#include <string>
+#include <vector>
 
 #include "sheneos/interpolator.hpp"
 #include "fname.h"
@@ -27,9 +33,12 @@ int omp_thread_count() {
 
 extern "C" {void FNAME(read_nuc_table)(); }
 
-extern "C" {void FNAME(nuc_eos_short)(double *xrho,double *xtemp,double *xye,double *xenr,
-                                      double *xprs,double *xent,double *xcs2,double *xdedt,
-                    double *xdpderho,double *xdpdrhoe,double *xmunu,int *keytemp,int *keyerr,double *rfeps); }
+extern "C" {void FNAME(nuc_eos_short)(double *xrho,double *xtemp,double *xye,
+                                      double *xenr,
+                                      double *xprs,double *xent,double *xcs2,
+                                      double *xdedt,
+                                      double *xdpderho,double *xdpdrhoe,double *xmunu,
+                                      int *keytemp,int *keyerr,double *rfeps); }
 
 char const* const shen_symbolic_name = "/sheneos/interpolator_test";
 
@@ -88,16 +97,17 @@ void test_sheneos(std::size_t num_ye_points, std::size_t num_temp_points,
     }
 
     std::size_t nthreads = omp_thread_count();
-    //std::size_t nthreads = omp_get_num_threads();   
+    //std::size_t nthreads = omp_get_num_threads();
     std::cout << " Number of OMP threads " << nthreads << std::endl;
-    std::cout << " Problem Size: Ye " << sequence_ye.size() << " T " << sequence_temp.size() << " R " << sequence_rho.size()  << std::endl;
+    std::cout << " Problem Size: Ye " << sequence_ye.size() << " T "
+        << sequence_temp.size() << " R " << sequence_rho.size()  << std::endl;
 
     ///////////////////////////////////////////////////////////////////////////
     // We want to avoid invoking the same evaluation sequence on all localities
     // performing the test, so we randomly shuffle the sequences. We combine
     // the shared seed with the locality id to ensure that each locality has
     // a unique, reproducible seed.
-#pragma omp parallel 
+#pragma omp parallel
     std::cout << " HELLO WORLD from thread " << omp_get_thread_num() << std::endl;
     std::srand(static_cast<unsigned int>(omp_get_thread_num() + hpx::get_locality_id()));
     std::random_shuffle(sequence_ye.begin(), sequence_ye.end());
@@ -130,7 +140,7 @@ void test_sheneos(std::size_t num_ye_points, std::size_t num_temp_points,
                 int keyerr = -666;
                 int keytemp = 1;
                 FNAME(nuc_eos_short)(&xrho,&xtemp,&xye,&xenr,&xprs,&xent,&xcs2,&xdedt,
-                                     &xdpderho,&xdpdrhoe,&xmunu,&keytemp,&keyerr,&rfeps); 
+                                     &xdpderho,&xdpdrhoe,&xmunu,&keytemp,&keyerr,&rfeps);
             }
         }
     }
@@ -225,16 +235,16 @@ void test_sheneos_one_bulk(std::size_t num_ye_points,
                 int keyerr = -666;
                 int keytemp = 1;
                 FNAME(nuc_eos_short)(&xrho,&xtemp,&xye,&xenr,&xprs,&xent,&xcs2,&xdedt,
-                                     &xdpderho,&xdpdrhoe,&xmunu,&keytemp,&keyerr,&rfeps); 
+                                     &xdpderho,&xdpdrhoe,&xmunu,&keytemp,&keyerr,&rfeps);
             }
         }
     }
-    
+
     //hpx::lcos::future<std::vector<double> > bulk_one_tests =
     //    shen.interpolate_one_bulk_async(values_ye, values_temp, values_rho,
     //        sheneos::server::partition3d::logpress);
 
-    //std::vector<double> results = hpx::lcos::wait(bulk_one_tests);
+    //std::vector<double> results = hpx::util::unwrap(bulk_one_tests);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -329,15 +339,15 @@ void test_sheneos_bulk(std::size_t num_ye_points,
                 int keyerr = -666;
                 int keytemp = 1;
                 FNAME(nuc_eos_short)(&xrho,&xtemp,&xye,&xenr,&xprs,&xent,&xcs2,&xdedt,
-                                     &xdpderho,&xdpdrhoe,&xmunu,&keytemp,&keyerr,&rfeps); 
+                                     &xdpderho,&xdpdrhoe,&xmunu,&keytemp,&keyerr,&rfeps);
             }
         }
     }
-    //std::vector<std::vector<double> > results = hpx::lcos::wait(bulk_tests);
+    //std::vector<std::vector<double> > results = hpx::util::unwrap(bulk_tests);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-int hpx_main(boost::program_options::variables_map& vm)
+int hpx_main(hpx::program_options::variables_map& vm)
 {
     std::string const datafilename = vm["file"].as<std::string>();
 
@@ -347,11 +357,9 @@ int hpx_main(boost::program_options::variables_map& vm)
 
     std::size_t const num_partitions = vm["num-partitions"].as<std::size_t>();
 
-    std::size_t num_workers = vm["num-workers"].as<std::size_t>();
-
     std::size_t seed = vm["seed"].as<std::size_t>();
     if (!seed)
-        seed = std::size_t(std::time(0));
+        seed = std::size_t(std::time(nullptr));
 
     std::cout << "Seed: " << seed << std::endl;
 
@@ -382,10 +390,12 @@ int hpx_main(boost::program_options::variables_map& vm)
         test_sheneos(num_ye_points,num_temp_points,num_rho_points,seed);
         std::cout << "Control case: " << t.elapsed() << " [s]" << std::endl;
 #if 0
+        std::size_t num_workers = vm["num-workers"].as<std::size_t>();
+
         // Kick off the computation asynchronously. On each locality,
         // num_workers test_actions are created.
         std::vector<hpx::lcos::future<void> > tests;
-        BOOST_FOREACH(hpx::naming::id_type const& id, locality_ids)
+        for (hpx::naming::id_type const& id : locality_ids)
         {
             using hpx::async;
             for (std::size_t i = 0; i < num_workers; ++i)
@@ -407,7 +417,7 @@ int hpx_main(boost::program_options::variables_map& vm)
         // Kick off the computation asynchronously. On each locality,
         // num_workers test_actions are created.
         std::vector<hpx::lcos::future<void> > bulk_one_tests;
-        BOOST_FOREACH(hpx::naming::id_type const& id, locality_ids)
+        for (hpx::naming::id_type const& id : locality_ids)
         {
             using hpx::async;
             for (std::size_t i = 0; i < num_workers; ++i)
@@ -430,7 +440,7 @@ int hpx_main(boost::program_options::variables_map& vm)
         // Kick off the computation asynchronously. On each locality,
         // num_workers test_actions are created.
         std::vector<hpx::lcos::future<void> > bulk_tests;
-        BOOST_FOREACH(hpx::naming::id_type const& id, locality_ids)
+        for (hpx::naming::id_type const& id : locality_ids)
         {
             using hpx::async;
             for (std::size_t i = 0; i < num_workers; ++i)
@@ -458,8 +468,8 @@ int hpx_main(boost::program_options::variables_map& vm)
 ///////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[])
 {
-    using boost::program_options::options_description;
-    using boost::program_options::value;
+    using hpx::program_options::options_description;
+    using hpx::program_options::value;
 
     // Configure application-specific options.
     options_description cmdline("Usage: " HPX_APPLICATION_STRING " [options]");

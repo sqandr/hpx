@@ -1,780 +1,821 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c) 2011 Bryce Lelbach & Katelyn Kufahl
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2015 Hartmut Kaiser
+//  Copyright (c) 2015 Anton Bikineev
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
-#include <hpx/version.hpp>
-#include <hpx/exception.hpp>
 #include <hpx/config.hpp>
-#include <hpx/hpx.hpp>
-#include <hpx/runtime/actions/plain_action.hpp>
-#include <hpx/runtime/components/plain_component_factory.hpp>
+
+#if defined(HPX_HAVE_NETWORKING)
+#include <hpx/actions/action_support.hpp>
+#include <hpx/actions_base/plain_action.hpp>
+#include <hpx/assert.hpp>
+#include <hpx/execution_base/this_thread.hpp>
+#include <hpx/functional/bind_front.hpp>
+#include <hpx/modules/format.hpp>
+#include <hpx/runtime/agas/addressing_service.hpp>
+#include <hpx/runtime/agas/big_boot_barrier.hpp>
+#include <hpx/runtime/agas/detail/hosted_component_namespace.hpp>
+#include <hpx/runtime/agas/detail/hosted_locality_namespace.hpp>
+#include <hpx/runtime/agas/interface.hpp>
+#include <hpx/runtime/agas/server/component_namespace.hpp>
+#include <hpx/runtime/agas/server/locality_namespace.hpp>
+#include <hpx/runtime/agas/server/primary_namespace.hpp>
+#include <hpx/runtime/agas/server/symbol_namespace.hpp>
+#include <hpx/runtime/agas/symbol_namespace.hpp>
 #include <hpx/runtime/components/server/managed_component_base.hpp>
-#include <hpx/util/portable_binary_iarchive.hpp>
-#include <hpx/util/container_device.hpp>
-#include <hpx/util/stringstream.hpp>
-#include <hpx/util/static.hpp>
-#include <hpx/runtime/actions/action_support.hpp>
+#include <hpx/runtime/naming/resolver_client.hpp>
+#include <hpx/runtime/parcelset/detail/parcel_await.hpp>
 #include <hpx/runtime/parcelset/parcel.hpp>
 #include <hpx/runtime/parcelset/parcelport.hpp>
-#include <hpx/runtime/parcelset/parcelport_connection.hpp>
-#include <hpx/runtime/naming/resolver_client.hpp>
-#include <hpx/runtime/agas/interface.hpp>
-#include <hpx/runtime/agas/big_boot_barrier.hpp>
+#include <hpx/runtime/parcelset/put_parcel.hpp>
+#include <hpx/runtime_configuration/runtime_configuration.hpp>
+#include <hpx/runtime_distributed.hpp>
+#include <hpx/runtime_local/runtime_local.hpp>
+#include <hpx/serialization/detail/polymorphic_id_factory.hpp>
+#include <hpx/serialization/vector.hpp>
+#include <hpx/static_reinit/reinitializable_static.hpp>
+#include <hpx/timing/high_resolution_clock.hpp>
+#include <hpx/topology/topology.hpp>
+#include <hpx/util/from_string.hpp>
 
-#include <boost/format.hpp>
-#include <boost/thread.hpp>
-#include <boost/assert.hpp>
-#include <boost/make_shared.hpp>
-#include <boost/shared_ptr.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace hpx { namespace detail
+{
+    std::string get_locality_base_name();
+}}
+
+namespace hpx { namespace agas { namespace detail
+{
+    void register_unassigned_typenames()
+    {
+        // supposed to be run on locality 0 before
+        // before locality communication
+        hpx::serialization::detail::id_registry& serialization_registry =
+            hpx::serialization::detail::id_registry::instance();
+
+        serialization_registry.fill_missing_typenames();
+
+        hpx::actions::detail::action_registry& action_registry =
+            hpx::actions::detail::action_registry::instance();
+        action_registry.fill_missing_typenames();
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    struct unassigned_typename_sequence
+    {
+        unassigned_typename_sequence() = default;
+
+        explicit unassigned_typename_sequence(bool /*dummy*/)
+          : serialization_typenames(hpx::serialization::detail::id_registry::
+                instance().get_unassigned_typenames())
+          , action_typenames(hpx::actions::detail::action_registry::
+                instance().get_unassigned_typenames())
+        {}
+
+        void save(hpx::serialization::output_archive& ar, unsigned) const
+        {
+            // part running on worker node
+            HPX_ASSERT(!action_typenames.empty());
+            ar << serialization_typenames;
+            ar << action_typenames;
+        }
+
+        void load(hpx::serialization::input_archive& ar, unsigned)
+        {
+            // part running on locality 0
+            ar >> serialization_typenames;
+            ar >> action_typenames;
+        }
+        HPX_SERIALIZATION_SPLIT_MEMBER();
+
+        std::vector<std::string> serialization_typenames;
+        std::vector<std::string> action_typenames;
+    };
+
+    ///////////////////////////////////////////////////////////////////////////
+    struct assigned_id_sequence
+    {
+        assigned_id_sequence() = default;
+
+        explicit assigned_id_sequence(
+            unassigned_typename_sequence const& typenames)
+        {
+            register_ids_on_main_loc(typenames);
+        }
+
+        void save(hpx::serialization::output_archive& ar, unsigned) const
+        {
+            HPX_ASSERT(!action_ids.empty());
+            ar << serialization_ids;      // part running on locality 0
+            ar << action_ids;
+        }
+
+        void load(hpx::serialization::input_archive& ar, unsigned)
+        {
+            ar >> serialization_ids;      // part running on worker node
+            ar >> action_ids;
+        }
+        HPX_SERIALIZATION_SPLIT_MEMBER();
+
+    private:
+        void register_ids_on_main_loc(
+            unassigned_typename_sequence const& unassigned_ids)
+        {
+            {
+                hpx::serialization::detail::id_registry& registry =
+                    hpx::serialization::detail::id_registry::instance();
+                std::uint32_t max_id = registry.get_max_registered_id();
+
+                for (const std::string& s : unassigned_ids.serialization_typenames)
+                {
+                    std::uint32_t id = registry.try_get_id(s);
+                    if (id == hpx::serialization::detail::id_registry::invalid_id)
+                    {
+                        // this id is not registered yet
+                        id = ++max_id;
+                        registry.register_typename(s, id);
+                    }
+                    serialization_ids.push_back(id);
+                }
+            }
+            {
+                hpx::actions::detail::action_registry& registry =
+                    hpx::actions::detail::action_registry::instance();
+                std::uint32_t max_id = registry.max_id_;
+
+                for (const std::string& s : unassigned_ids.action_typenames)
+                {
+                    std::uint32_t id = registry.try_get_id(s);
+                    if (id == hpx::actions::detail::action_registry::invalid_id)
+                    {
+                        // this id is not registered yet
+                        id = ++max_id;
+                        registry.register_typename(s, id);
+                    }
+                    action_ids.push_back(id);
+                }
+            }
+        }
+
+    public:
+        void register_ids_on_worker_loc() const
+        {
+            {
+                hpx::serialization::detail::id_registry& registry =
+                    hpx::serialization::detail::id_registry::instance();
+
+                // Yes, we look up the unassigned typenames twice, but this allows
+                // to avoid using globals and protects from race conditions during
+                // de-serialization.
+                std::vector<std::string> typenames =
+                    registry.get_unassigned_typenames();
+
+                // we should have received as many ids as we have unassigned names
+                HPX_ASSERT(typenames.size() == serialization_ids.size());
+
+                for (std::size_t k = 0; k < serialization_ids.size(); ++k)
+                {
+                    registry.register_typename(typenames[k], serialization_ids[k]);
+                }
+
+                // fill in holes which might have been caused by initialization
+                // order problems
+                registry.fill_missing_typenames();
+            }
+            {
+                hpx::actions::detail::action_registry& registry =
+                    hpx::actions::detail::action_registry::instance();
+
+                // Yes, we look up the unassigned typenames twice, but this allows
+                // to avoid using globals and protects from race conditions during
+                // de-serialization.
+                std::vector<std::string> typenames =
+                    registry.get_unassigned_typenames();
+
+                // we should have received as many ids as we have unassigned names
+                HPX_ASSERT(typenames.size() == action_ids.size());
+
+                for (std::size_t k = 0; k < action_ids.size(); ++k)
+                {
+                    registry.register_typename(typenames[k], action_ids[k]);
+                }
+
+                // fill in holes which might have been caused by initialization
+                // order problems
+                registry.fill_missing_typenames();
+            }
+        }
+
+        std::vector<std::uint32_t> serialization_ids;
+        std::vector<std::uint32_t> action_ids;
+    };
+}}} // namespace hpx::agas::detail
 
 namespace hpx { namespace agas
 {
-
-typedef components::detail::heap_factory<
-    lcos::detail::promise<
-        response
-      , response
-    >
-  , components::managed_component<
-        lcos::detail::promise<
-            response
-          , response
-        >
-    >
-> response_heap_type;
-
-// TODO: Make assertions exceptions
-void early_parcel_sink(
-    boost::shared_ptr<std::vector<char> > parcel_data
-    )
-{ // {{{
-    typedef util::container_device<std::vector<char> > io_device_type;
-    boost::iostreams::stream<io_device_type> io (*parcel_data);
-
-    // De-serialize the parcel data
-    util::portable_binary_iarchive archive(io);
-
-    std::size_t parcel_count = 0;
-    archive >> parcel_count;
-    for(std::size_t i = 0; i < parcel_count; ++i)
-    {
-        parcelset::parcel p;
-        archive >> p;
-
-        // decode the action-type in the parcel
-        actions::action_type act = p.get_action();
-
-        // early parcels should only be plain actions
-        BOOST_ASSERT(actions::base_action::plain_action == act->get_action_type());
-
-        // early parcels can't have continuations
-        BOOST_ASSERT(!p.get_continuation());
-
-        // We should not allow any exceptions to escape the execution of the
-        // action as this would bring down the ASIO thread we execute in.
-        try {
-            act->get_thread_function(0)
-                (threads::thread_state_ex(threads::wait_signaled));
+    template <typename Action, typename... Args>
+    void big_boot_barrier::apply(
+        std::uint32_t source_locality_id
+      , std::uint32_t target_locality_id
+      , parcelset::locality dest
+      , Action act
+      , Args &&... args)
+    { // {{{
+        HPX_ASSERT(pp);
+        naming::address addr(naming::get_gid_from_locality_id(target_locality_id));
+        parcelset::parcel p(
+            parcelset::detail::create_parcel::call(
+                naming::get_gid_from_locality_id(target_locality_id),
+                std::move(addr), act, std::forward<Args>(args)...));
+#if defined(HPX_HAVE_PARCEL_PROFILING)
+        if (!p.parcel_id())
+        {
+            p.parcel_id() = parcelset::parcel::generate_unique_id(source_locality_id);
         }
-        catch (...) {
-            std::cerr << hpx::diagnostic_information(boost::current_exception())
-                      << std::endl;
-            std::abort();
-        }
-    }
-} // }}}
+#endif
 
-void early_write_handler(
-    boost::system::error_code const& e
-  , std::size_t size
-    )
-{
-    // no-op
-}
+        parcelset::detail::parcel_await_apply(std::move(p),
+            parcelset::write_handler_type(), 0,
+            [this, dest](parcelset::parcel&& p, parcelset::write_handler_type&&)
+            {
+                pp->send_early_parcel(dest, std::move(p));
+            });
+    } // }}}
 
-void early_pending_parcel_handler(naming::locality const&)
-{
-    // no-op
-}
+    template <typename Action, typename... Args>
+    void big_boot_barrier::apply_late(
+        std::uint32_t source_locality_id
+      , std::uint32_t target_locality_id
+      , parcelset::locality const & dest
+      , Action act
+      , Args &&... args)
+    { // {{{
+        naming::address addr(naming::get_gid_from_locality_id(target_locality_id));
 
+        parcelset::put_parcel(
+            naming::id_type(
+                naming::get_gid_from_locality_id(target_locality_id),
+                naming::id_type::unmanaged),
+            std::move(addr), act, std::forward<Args>(args)...);
+    } // }}}
+
+//typedef components::detail::heap_factory<
+//    lcos::detail::promise<
+//        response
+//      , response
+//    >
+//  , components::managed_component<
+//        lcos::detail::promise<
+//            response
+//          , response
+//        >
+//    >
+//> response_heap_type;
+
+// This structure is used when a locality registers with node zero
+// (first round trip)
 struct registration_header
 {
-    registration_header() {}
-
-    // TODO: pass head address as a GVA
-    // TODO: response_heap_address_ holds a redundant copy of the locality
-    registration_header(
-        naming::locality const& locality_
-      , boost::uint64_t parcelport_allocation_
-      , boost::uint64_t response_allocation_
-      , naming::address const& response_heap_address_
-      , std::size_t response_heap_offset_
-      , std::size_t response_heap_ptr_
-      , std::size_t component_runtime_support_ptr_
-      , std::size_t component_memory_ptr_
-    ) :
-        locality(locality_)
-      , parcelport_allocation(parcelport_allocation_)
-      , response_allocation(response_allocation_)
-      , response_heap_address(response_heap_address_)
-      , response_heap_offset(response_heap_offset_)
-      , response_heap_ptr(response_heap_ptr_)
-      , component_runtime_support_ptr(component_runtime_support_ptr_)
-      , component_memory_ptr(component_memory_ptr_)
+    registration_header()
+      : primary_ns_ptr(0)
+      , symbol_ns_ptr(0)
+      , cores_needed(0)
+      , num_threads(0)
     {}
 
-    naming::locality locality;
-    boost::uint64_t parcelport_allocation;
-    boost::uint64_t response_allocation;
-    naming::address response_heap_address;
-    std::size_t response_heap_offset;
-    std::size_t response_heap_ptr;
-    std::size_t component_runtime_support_ptr;
-    std::size_t component_memory_ptr;
+    // TODO: pass head address as a GVA
+    registration_header(
+          parcelset::endpoints_type const& endpoints_
+        , std::uint64_t primary_ns_ptr_
+        , std::uint64_t symbol_ns_ptr_
+        , std::uint32_t cores_needed_
+        , std::uint32_t num_threads_
+        , std::string const& hostname_
+        , detail::unassigned_typename_sequence const& typenames_
+        , naming::gid_type prefix_ = naming::gid_type())
+      : endpoints(endpoints_)
+      , primary_ns_ptr(primary_ns_ptr_)
+      , symbol_ns_ptr(symbol_ns_ptr_)
+      , cores_needed(cores_needed_)
+      , num_threads(num_threads_)
+      , hostname(hostname_)
+      , typenames(typenames_)
+      , prefix(prefix_)
+    {}
+
+    parcelset::endpoints_type endpoints;
+    std::uint64_t primary_ns_ptr;
+    std::uint64_t symbol_ns_ptr;
+    std::uint32_t cores_needed;
+    std::uint32_t num_threads;
+    std::string hostname;           // hostname of locality
+    detail::unassigned_typename_sequence typenames;
+    naming::gid_type prefix;        // suggested prefix (optional)
 
     template <typename Archive>
     void serialize(Archive & ar, const unsigned int)
     {
-        ar & locality;
-        ar & parcelport_allocation;
-        ar & response_allocation;
-        ar & response_heap_address;
-        ar & response_heap_offset;
-        ar & response_heap_ptr;
-        ar & component_runtime_support_ptr;
-        ar & component_memory_ptr;
+        ar & endpoints;
+        ar & primary_ns_ptr;
+        ar & symbol_ns_ptr;
+        ar & cores_needed;
+        ar & num_threads;
+        ar & hostname;
+        ar & typenames;
+        ar & prefix;
     }
 };
 
-// TODO: We don't need to send the full gid for the lower and upper bound of
-// each range, we can just send the lower gid and offsets into it.
+// This structure is used in the response from node zero to the locality which
+// is trying to register (first roundtrip).
 struct notification_header
 {
-    notification_header() {}
+    notification_header()
+      : num_localities(0)
+      , used_cores(0)
+    {}
 
     notification_header(
-        naming::gid_type const& prefix_
-      , naming::address const& response_pool_address_
-      , std::size_t response_heap_ptr_
-      , naming::gid_type const& response_lower_gid_
-      , naming::gid_type const& response_upper_gid_
-      , naming::gid_type const& parcelport_lower_gid_
-      , naming::gid_type const& parcelport_upper_gid_
-      , naming::address const& primary_ns_address_
-      , naming::address const& component_ns_address_
-      , naming::address const& symbol_ns_address_
-    ) :
-        prefix(prefix_)
-      , response_pool_address(response_pool_address_)
-      , response_heap_ptr(response_heap_ptr_)
-      , response_lower_gid(response_lower_gid_)
-      , response_upper_gid(response_upper_gid_)
-      , parcelport_lower_gid(parcelport_lower_gid_)
-      , parcelport_upper_gid(parcelport_upper_gid_)
+          naming::gid_type const& prefix_
+        , parcelset::locality const & agas_locality_
+        , naming::address const& locality_ns_address_
+        , naming::address const& primary_ns_address_
+        , naming::address const& component_ns_address_
+        , naming::address const& symbol_ns_address_
+        , std::uint32_t num_localities_
+        , std::uint32_t used_cores_
+        , parcelset::endpoints_type const & agas_endpoints_
+        , detail::assigned_id_sequence const & ids_)
+      : prefix(prefix_)
+      , agas_locality(agas_locality_)
+      , locality_ns_address(locality_ns_address_)
       , primary_ns_address(primary_ns_address_)
       , component_ns_address(component_ns_address_)
       , symbol_ns_address(symbol_ns_address_)
+      , num_localities(num_localities_)
+      , used_cores(used_cores_)
+      , agas_endpoints(agas_endpoints_)
+      , ids(ids_)
     {}
 
     naming::gid_type prefix;
-    naming::address response_pool_address;
-    std::size_t response_heap_ptr;
-    naming::gid_type response_lower_gid;
-    naming::gid_type response_upper_gid;
-    naming::gid_type parcelport_lower_gid;
-    naming::gid_type parcelport_upper_gid;
+    parcelset::locality agas_locality;
+    naming::address locality_ns_address;
     naming::address primary_ns_address;
     naming::address component_ns_address;
     naming::address symbol_ns_address;
+    std::uint32_t num_localities;
+    std::uint32_t used_cores;
+    parcelset::endpoints_type agas_endpoints;
+    detail::assigned_id_sequence ids;
+    std::vector<parcelset::endpoints_type> endpoints;
 
     template <typename Archive>
     void serialize(Archive & ar, const unsigned int)
     {
         ar & prefix;
-        ar & response_pool_address;
-        ar & response_heap_ptr;
-        ar & response_lower_gid;
-        ar & response_upper_gid;
-        ar & parcelport_lower_gid;
-        ar & parcelport_upper_gid;
+        ar & agas_locality;
+        ar & locality_ns_address;
         ar & primary_ns_address;
         ar & component_ns_address;
         ar & symbol_ns_address;
+        ar & num_localities;
+        ar & used_cores;
+        ar & agas_endpoints;
+        ar & ids;
+        ar & endpoints;
     }
 };
 
 // {{{ early action forwards
-void register_console(registration_header const& header);
-
-void notify_console(notification_header const& header);
-
 void register_worker(registration_header const& header);
-
 void notify_worker(notification_header const& header);
 // }}}
 
 // {{{ early action types
-typedef actions::plain_action1<
-    registration_header const&
-  , register_console
-  , threads::thread_priority_critical
-> register_console_action;
-
-typedef actions::plain_action1<
-    notification_header const&
-  , notify_console
-  , threads::thread_priority_critical
-> notify_console_action;
-
-typedef actions::plain_action1<
-    registration_header const&
+typedef actions::direct_action<
+    void (*)(registration_header const&)
   , register_worker
-  , threads::thread_priority_critical
 > register_worker_action;
 
-typedef actions::plain_action1<
-    notification_header const&
+typedef actions::direct_action<
+    void (*)(notification_header const&)
   , notify_worker
-  , threads::thread_priority_critical
 > notify_worker_action;
 // }}}
 
-// {{{ early action definitions
-// remote call to AGAS
-// TODO: pass data members from the notification header to the client API instead
-// of using temporaries which cause copying
-// TODO: merge with register_worker which is all but identical
-void register_console(registration_header const& header)
+}}
+
+using hpx::agas::register_worker_action;
+using hpx::agas::notify_worker_action;
+
+HPX_ACTION_HAS_CRITICAL_PRIORITY(register_worker_action);
+HPX_ACTION_HAS_CRITICAL_PRIORITY(notify_worker_action);
+
+HPX_REGISTER_ACTION_ID(register_worker_action,
+    register_worker_action,
+    hpx::actions::register_worker_action_id)
+HPX_REGISTER_ACTION_ID(notify_worker_action,
+    notify_worker_action,
+    hpx::actions::notify_worker_action_id)
+
+namespace hpx { namespace agas
 {
-    // This lock acquires the bbb mutex on creation. When it goes out of scope,
-    // it's dtor calls big_boot_barrier::notify().
-    big_boot_barrier::scoped_lock lock(get_big_boot_barrier());
-
-    naming::resolver_client& agas_client = get_runtime().get_agas_client();
-
-    if (HPX_UNLIKELY(!agas_client.is_bootstrap()))
-    {
-        HPX_THROW_EXCEPTION(internal_server_error
-            , "agas::register_console"
-            , "registration parcel received by non-bootstrap locality");
-    }
-
-    naming::gid_type prefix
-                   , parcel_lower, parcel_upper
-                   , heap_lower, heap_upper;
-
-    agas_client.register_locality(header.locality, prefix);
-
-    agas_client.get_id_range(header.locality, header.parcelport_allocation
-                           , parcel_lower, parcel_upper);
-    agas_client.get_id_range(header.locality, header.response_allocation
-                           , heap_lower, heap_upper);
-
-    naming::gid_type runtime_support_gid(prefix.get_msb()
-                                       , header.component_runtime_support_ptr)
-                   , memory_gid(prefix.get_msb()
-                              , header.component_memory_ptr);
-
-    naming::address runtime_support_address
-        (header.locality,
-         components::get_component_type<components::server::runtime_support>(),
-         header.component_runtime_support_ptr);
-
-    naming::address memory_address
-        (header.locality,
-         components::get_component_type<components::server::memory>(),
-         header.component_memory_ptr);
-
-    agas_client.bind(runtime_support_gid, runtime_support_address);
-    agas_client.bind(memory_gid, memory_address);
-
-    agas_client.bind_range(heap_lower, header.response_allocation
-                         , header.response_heap_address
-                         , header.response_heap_offset);
-
-    agas::register_name("/locality(console)", prefix);
-
-    naming::address primary_addr(get_runtime().here(),
-        server::primary_namespace::get_component_type(),
-            static_cast<void*>(&agas_client.bootstrap->primary_ns_server));
-    naming::address component_addr(get_runtime().here(),
-        server::component_namespace::get_component_type(),
-            static_cast<void*>(&agas_client.bootstrap->component_ns_server));
-    naming::address symbol_addr(get_runtime().here(),
-        server::symbol_namespace::get_component_type(),
-            static_cast<void*>(&agas_client.bootstrap->symbol_ns_server));
-
-    actions::base_action* p =
-        new actions::transfer_action<notify_console_action>(
-            notification_header(
-                prefix, header.response_heap_address, header.response_heap_ptr,
-                heap_lower, heap_upper, parcel_lower, parcel_upper,
-                primary_addr, component_addr, symbol_addr));
-
-    HPX_STD_FUNCTION<void()>* thunk = new HPX_STD_FUNCTION<void()>
-        (boost::bind(&big_boot_barrier::apply
-                   , boost::ref(get_big_boot_barrier())
-                   , naming::get_locality_id_from_gid(prefix)
-                   , naming::address(header.locality)
-                   , p));
-
-    get_big_boot_barrier().add_thunk(thunk);
-}
-
-// TODO: merge with notify_worker which is all but identical
-// TODO: callback must finishing installing new heap
-// TODO: callback must set up future pool
-// AGAS callback to client
-void notify_console(notification_header const& header)
-{
-    // This lock acquires the bbb mutex on creation. When it goes out of scope,
-    // it's dtor calls big_boot_barrier::notify().
-    big_boot_barrier::scoped_lock lock(get_big_boot_barrier());
-
-    naming::resolver_client& agas_client = get_runtime().get_agas_client();
-
-    if (HPX_UNLIKELY(agas_client.status() != starting))
-    {
-        hpx::util::osstream strm;
-        strm << "locality "
-             << get_runtime().here()
-             << " has launched early";
-        HPX_THROW_EXCEPTION(internal_server_error,
-            "agas::notify_console",
-            hpx::util::osstream_get_string(strm));
-    }
-
-    // set our prefix
-    agas_client.local_locality(header.prefix);
-    get_runtime().get_config().parse("assigned locality",
-        boost::str(boost::format("hpx.locality=%1%")
-                  % naming::get_locality_id_from_gid(header.prefix)));
-
-    // store the full addresses of the agas servers in our local router
-    agas_client.primary_ns_addr_ = header.primary_ns_address;
-    agas_client.component_ns_addr_ = header.component_ns_address;
-    agas_client.symbol_ns_addr_ = header.symbol_ns_address;
-
-    // Assign the initial parcel gid range to the parcelport. Note that we can't
-    // get the parcelport through the parcelhandler because it isn't up yet.
-    get_runtime().get_id_pool().set_range(header.parcelport_lower_gid
-                                        , header.parcelport_upper_gid);
-
-    // assign the initial gid range to the unique id range allocator that our
-    // response heap is using
-    response_heap_type::get_heap().set_range(header.response_lower_gid
-                                           , header.response_upper_gid);
-
-    // finish setting up the first heap.
-    response_heap_type::block_type* p
-        = reinterpret_cast<response_heap_type::block_type*>
-            (header.response_heap_ptr);
-
-    // set the base gid that we bound to this heap
-    p->set_gid(header.response_lower_gid);
-
-    // push the heap onto the OSHL
-    response_heap_type::get_heap().add_heap(p);
-
-    // set up the future pools
-    naming::resolver_client::promise_pool_type& promise_pool
-        = agas_client.hosted->promise_pool_;
-
-    util::runtime_configuration const& ini_ = get_runtime().get_config();
-
-    const std::size_t pool_size = ini_.get_agas_promise_pool_size();
-
-    for (std::size_t i = 0; i < pool_size; ++i)
-        promise_pool.enqueue(
-            new lcos::packaged_action<server::primary_namespace::service_action>);
-}
 
 // remote call to AGAS
 void register_worker(registration_header const& header)
 {
     // This lock acquires the bbb mutex on creation. When it goes out of scope,
-    // it's dtor calls big_boot_barrier::notify().
+    // its dtor calls big_boot_barrier::notify().
     big_boot_barrier::scoped_lock lock(get_big_boot_barrier());
 
-    naming::resolver_client& agas_client = get_runtime().get_agas_client();
+    runtime_distributed& rtd = get_runtime_distributed();
+    naming::resolver_client& agas_client = rtd.get_agas_client();
 
     if (HPX_UNLIKELY(agas_client.is_connecting()))
     {
-        HPX_THROW_EXCEPTION(internal_server_error
-            , "agas::register_worker"
-            , "runtime_mode_connect can't find running application.");
+        HPX_THROW_EXCEPTION(
+            internal_server_error
+          , "agas::register_worker"
+          , "a locality in connect mode cannot be an AGAS server.");
     }
 
     if (HPX_UNLIKELY(!agas_client.is_bootstrap()))
     {
-        HPX_THROW_EXCEPTION(internal_server_error
-            , "agas::register_worker"
-            , "registration parcel received by non-bootstrap locality.");
+        HPX_THROW_EXCEPTION(
+            internal_server_error
+          , "agas::register_worker"
+          , "registration parcel received by non-bootstrap locality.");
     }
 
-    naming::gid_type prefix
-                   , parcel_lower, parcel_upper
-                   , heap_lower, heap_upper;
+    naming::gid_type prefix = header.prefix;
+    if (prefix != naming::invalid_gid && naming::get_locality_id_from_gid(prefix) == 0)
+    {
+        HPX_THROW_EXCEPTION(internal_server_error
+            , "agas::register_worker"
+            , hpx::util::format(
+                "worker node ({}) can't suggest locality_id zero, "
+                "this is reserved for the console",
+                header.endpoints));
+        return;
+    }
 
-    agas_client.register_locality(header.locality, prefix);
+    if (!agas_client.register_locality(header.endpoints, prefix, header.num_threads))
+    {
+        HPX_THROW_EXCEPTION(internal_server_error
+            , "agas::register_worker"
+            , hpx::util::format(
+                "attempt to register locality {} more than once",
+                header.endpoints));
+        return;
+    }
 
-    agas_client.get_id_range(header.locality, header.parcelport_allocation
-                           , parcel_lower, parcel_upper);
-    agas_client.get_id_range(header.locality, header.response_allocation
-                           , heap_lower, heap_upper);
+//     naming::gid_type primary_ns_gid(
+//         primary_namespace::get_service_instance(prefix));
+//     naming::address primary_ns_address(prefix
+//       , components::get_component_type<agas::server::primary_namespace>()
+//       , header.primary_ns_ptr);
+//     agas_client.bind_local(primary_ns_gid, primary_ns_address);
 
-    naming::gid_type runtime_support_gid(prefix.get_msb()
-                                       , header.component_runtime_support_ptr)
-                   , memory_gid(prefix.get_msb()
-                              , header.component_memory_ptr);
+//     naming::gid_type symbol_ns_gid(
+//         symbol_namespace::get_service_instance(prefix));
+//     naming::address symbol_ns_address(prefix
+//       , components::get_component_type<agas::server::symbol_namespace>()
+//       , header.symbol_ns_ptr);
+//     agas_client.bind_local(symbol_ns_gid, symbol_ns_address);
 
-    naming::address runtime_support_address
-        (header.locality,
-         components::get_component_type<components::server::runtime_support>(),
-         header.component_runtime_support_ptr);
+    naming::address locality_addr(hpx::get_locality(),
+        hpx::components::component_agas_locality_namespace,
+            agas_client.locality_ns_->ptr());
+    naming::address primary_addr(hpx::get_locality(),
+        hpx::components::component_agas_primary_namespace,
+            agas_client.primary_ns_.ptr());
+    naming::address component_addr(hpx::get_locality(),
+        hpx::components::component_agas_component_namespace,
+            agas_client.component_ns_->ptr());
+    naming::address symbol_addr(hpx::get_locality(),
+        hpx::components::component_agas_symbol_namespace,
+            agas_client.symbol_ns_.ptr());
 
-    naming::address memory_address
-        (header.locality,
-         components::get_component_type<components::server::memory>(),
-         header.component_memory_ptr);
+    // assign cores to the new locality
+    std::uint32_t first_core = rtd.assign_cores(header.hostname,
+        header.cores_needed);
 
-    agas_client.bind(runtime_support_gid, runtime_support_address);
-    agas_client.bind(memory_gid, memory_address);
+    big_boot_barrier & bbb = get_big_boot_barrier();
 
-    agas_client.bind_range(heap_lower, header.response_allocation
-                         , header.response_heap_address
-                         , header.response_heap_offset);
+    // register all ids
+    detail::assigned_id_sequence assigned_ids(header.typenames);
 
-    naming::address primary_addr(get_runtime().here(),
-        server::primary_namespace::get_component_type(),
-            static_cast<void*>(&agas_client.bootstrap->primary_ns_server));
-    naming::address component_addr(get_runtime().here(),
-        server::component_namespace::get_component_type(),
-            static_cast<void*>(&agas_client.bootstrap->component_ns_server));
-    naming::address symbol_addr(get_runtime().here(),
-        server::symbol_namespace::get_component_type(),
-            static_cast<void*>(&agas_client.bootstrap->symbol_ns_server));
+    notification_header hdr (prefix, bbb.here(), locality_addr, primary_addr
+      , component_addr, symbol_addr, rtd.get_config().get_num_localities()
+      , first_core, bbb.get_endpoints(), assigned_ids);
 
-    actions::base_action* p =
-        new actions::transfer_action<notify_console_action>(
-            notification_header(
-                prefix, header.response_heap_address, header.response_heap_ptr,
-                heap_lower, heap_upper, parcel_lower, parcel_upper,
-                primary_addr, component_addr, symbol_addr));
+    parcelset::locality dest;
+    parcelset::locality here = bbb.here();
+    for (parcelset::endpoints_type::value_type const & loc : header.endpoints)
+    {
+        if(loc.second.type() == here.type())
+        {
+            dest = loc.second;
+            break;
+        }
+    }
 
-    // FIXME: This could screw with startup.
+    // collect endpoints from all registering localities
+    bbb.add_locality_endpoints(naming::get_locality_id_from_gid(prefix),
+        header.endpoints);
 
     // TODO: Handle cases where localities try to connect to AGAS while it's
     // shutting down.
-    if (agas_client.status() != starting)
+    if (agas_client.get_status() != state_starting)
     {
         // We can just send the parcel now, the connecting locality isn't a part
         // of startup synchronization.
-        get_big_boot_barrier().apply(naming::get_locality_id_from_gid(prefix)
-                                   , naming::address(header.locality), p);
+        get_big_boot_barrier().apply_late(
+            0
+          , naming::get_locality_id_from_gid(prefix)
+          , dest
+          , notify_worker_action()
+          , std::move(hdr));
     }
 
-    else // AGAS is starting up; this locality is participating in startup
-    {    // synchronization.
-        HPX_STD_FUNCTION<void()>* thunk = new HPX_STD_FUNCTION<void()>
-            (boost::bind(&big_boot_barrier::apply
-                       , boost::ref(get_big_boot_barrier())
-                       , naming::get_locality_id_from_gid(prefix)
-                       , naming::address(header.locality)
-                       , p));
+    else
+    {
+        // AGAS is starting up; this locality is participating in startup
+        // synchronization.
 
+        // delay the final response until the runtime system is up and running
+        util::unique_function_nonser<void()>* thunk =
+            new util::unique_function_nonser<void()>(
+                util::one_shot(util::bind_front(
+                    &big_boot_barrier::apply_notification
+                  , &get_big_boot_barrier()
+                  , 0
+                  , naming::get_locality_id_from_gid(prefix)
+                  , dest
+                  , std::move(hdr))));
         get_big_boot_barrier().add_thunk(thunk);
     }
 }
 
-// TODO: callback must finish installing new heap
-// TODO: callback must set up future pool
-// AGAS callback to client
+// AGAS callback to client (first round trip response)
 void notify_worker(notification_header const& header)
 {
     // This lock acquires the bbb mutex on creation. When it goes out of scope,
     // it's dtor calls big_boot_barrier::notify().
     big_boot_barrier::scoped_lock lock(get_big_boot_barrier());
 
-    naming::resolver_client& agas_client = get_runtime().get_agas_client();
+    // register all ids with this locality
+    header.ids.register_ids_on_worker_loc();
+
+    runtime_distributed& rtd = get_runtime_distributed();
+    naming::resolver_client& agas_client = rtd.get_agas_client();
+
+    if (HPX_UNLIKELY(agas_client.get_status() != state_starting))
+    {
+        std::ostringstream strm;
+        strm << "locality " << rtd.here() << " has launched early";
+        HPX_THROW_EXCEPTION(internal_server_error,
+            "agas::notify_worker",
+            strm.str());
+    }
+
+    util::runtime_configuration& cfg = rtd.get_config();
 
     // set our prefix
-    agas_client.local_locality(header.prefix);
-    get_runtime().get_config().parse("assigned locality",
-        boost::str(boost::format("hpx.locality=%1%")
-                  % naming::get_locality_id_from_gid(header.prefix)));
+    agas_client.set_local_locality(header.prefix);
+    agas_client.register_console(header.agas_endpoints);
+    cfg.parse("assigned locality",
+        hpx::util::format("hpx.locality!={1}",
+            naming::get_locality_id_from_gid(header.prefix)));
 
     // store the full addresses of the agas servers in our local service
-    agas_client.primary_ns_addr_ = header.primary_ns_address;
-    agas_client.component_ns_addr_ = header.component_ns_address;
-    agas_client.symbol_ns_addr_ = header.symbol_ns_address;
+    agas_client.component_ns_.reset(
+        new detail::hosted_component_namespace(header.component_ns_address));
+    agas_client.locality_ns_.reset(
+        new detail::hosted_locality_namespace(header.locality_ns_address));
+    naming::gid_type const& here = hpx::get_locality();
+
+    // register runtime support component
+    naming::gid_type runtime_support_gid(header.prefix.get_msb()
+      , rtd.get_runtime_support_lva());
+    naming::address const runtime_support_address(here
+      , components::get_component_type<components::server::runtime_support>()
+      , rtd.get_runtime_support_lva());
+    agas_client.bind_local(runtime_support_gid, runtime_support_address);
+
+    runtime_support_gid.set_lsb(std::uint64_t(0));
+    agas_client.bind_local(runtime_support_gid, runtime_support_address);
 
     // Assign the initial parcel gid range to the parcelport. Note that we can't
     // get the parcelport through the parcelhandler because it isn't up yet.
-    get_runtime().get_id_pool().set_range(header.parcelport_lower_gid
-                                        , header.parcelport_upper_gid);
+    naming::gid_type parcel_lower, parcel_upper;
+    agas_client.get_id_range(1000, parcel_lower, parcel_upper);
 
-    // assign the initial gid range to the unique id range allocator that our
-    // response heap is using
-    response_heap_type::get_heap().set_range(header.response_lower_gid
-                                           , header.response_upper_gid);
+    rtd.get_id_pool().set_range(parcel_lower, parcel_upper);
 
-    // finish setting up the first heap.
-    response_heap_type::block_type* p
-        = reinterpret_cast<response_heap_type::block_type*>
-            (header.response_heap_ptr);
+    // store number of initial localities
+    cfg.set_num_localities(header.num_localities);
 
-    // set the base gid that we bound to this heap
-    p->set_gid(header.response_lower_gid);
+    // store number of used cores by other localities
+    cfg.set_first_used_core(header.used_cores);
+    rtd.assign_cores();
 
-    // push the heap onto the OSHL
-    response_heap_type::get_heap().add_heap(p);
-
-    // set up the future pools
-    naming::resolver_client::promise_pool_type& promise_pool
-        = agas_client.hosted->promise_pool_;
-
-    util::runtime_configuration const& ini_ = get_runtime().get_config();
-
-    const std::size_t pool_size = ini_.get_agas_promise_pool_size();
-
-    for (std::size_t i = 0; i < pool_size; ++i)
-        promise_pool.enqueue(
-            new lcos::packaged_action<server::primary_namespace::service_action>);
+    // pre-cache all known locality endpoints in local AGAS
+    agas_client.pre_cache_endpoints(header.endpoints);
 }
 // }}}
 
-}}
-
-using hpx::agas::register_console_action;
-using hpx::agas::notify_console_action;
-using hpx::agas::register_worker_action;
-using hpx::agas::notify_worker_action;
-
-HPX_REGISTER_PLAIN_ACTION_EX2(register_console_action,
-    register_console_action, hpx::components::factory_enabled)
-HPX_REGISTER_PLAIN_ACTION_EX2(notify_console_action,
-    notify_console_action, hpx::components::factory_enabled)
-HPX_REGISTER_PLAIN_ACTION_EX2(register_worker_action,
-    register_worker_action, hpx::components::factory_enabled)
-HPX_REGISTER_PLAIN_ACTION_EX2(notify_worker_action,
-    notify_worker_action, hpx::components::factory_enabled)
-
-namespace hpx { namespace agas
+void big_boot_barrier::apply_notification(
+    std::uint32_t source_locality_id
+    , std::uint32_t target_locality_id
+    , parcelset::locality const& dest
+    , notification_header && hdr)
 {
+    hdr.endpoints = localities;
+    apply(source_locality_id, target_locality_id, dest,
+        notify_worker_action(), std::move(hdr));
+}
 
+void big_boot_barrier::add_locality_endpoints(std::uint32_t locality_id,
+    parcelset::endpoints_type const& endpoints_data)
+{
+    if (localities.size() < static_cast<std::size_t>(locality_id) + 1)
+        localities.resize(static_cast<std::size_t>(locality_id) + 1);
+
+    localities[static_cast<std::size_t>(locality_id)] = endpoints_data;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 void big_boot_barrier::spin()
 {
-    boost::mutex::scoped_lock lock(mtx);
+    std::unique_lock<std::mutex> lock(mtx);
     while (connected)
         cond.wait(lock);
+
+    // pre-cache all known locality endpoints in local AGAS on locality 0 as well
+    if (service_mode_bootstrap == service_type)
+    {
+        naming::resolver_client& agas_client =
+            get_runtime_distributed().get_agas_client();
+        agas_client.pre_cache_endpoints(localities);
+    }
+}
+
+inline std::size_t get_number_of_bootstrap_connections(
+    util::runtime_configuration const& ini)
+{
+    service_mode service_type = ini.get_agas_service_mode();
+    std::size_t result = 1;
+
+    if (service_mode_bootstrap == service_type)
+    {
+        std::size_t num_localities =
+            static_cast<std::size_t>(ini.get_num_localities());
+        result = num_localities ? num_localities-1 : 0;
+    }
+
+    return result;
 }
 
 big_boot_barrier::big_boot_barrier(
-    parcelset::parcelport& pp_
+    parcelset::parcelport *pp_
+  , parcelset::endpoints_type const& endpoints_
   , util::runtime_configuration const& ini_
-  , runtime_mode runtime_type_
 ):
     pp(pp_)
-  , connection_cache_(pp_.get_connection_cache())
-  , io_service_pool_(pp_.get_io_service_pool())
+  , endpoints(endpoints_)
   , service_type(ini_.get_agas_service_mode())
-  , runtime_type(runtime_type_)
-  , bootstrap_agas(ini_.get_agas_locality())
+  , bootstrap_agas(pp_ ? pp_->agas_locality(ini_) : parcelset::locality())
   , cond()
   , mtx()
-  , connected( (service_mode_bootstrap == service_type)
-             ? ( ini_.get_num_localities()
-               ? (ini_.get_num_localities() - 1)
-               : 0)
-             : 1)
+  , connected(get_number_of_bootstrap_connections(ini_))
+  , thunks(32)
 {
-    pp_.register_event_handler(boost::bind(&early_parcel_sink, _2));
+    // register all not registered typenames
+    if (service_type == service_mode_bootstrap)
+    {
+        detail::register_unassigned_typenames();
+        // store endpoints of root locality for later
+        add_locality_endpoints(0, get_endpoints());
+    }
 }
 
-void big_boot_barrier::apply(
-    boost::uint32_t locality_id
-  , naming::address const& addr
-  , actions::base_action* act
-) { // {{{
-    parcelset::parcel p(naming::get_gid_from_locality_id(locality_id), addr, act);
+void big_boot_barrier::wait_bootstrap()
+{ // {{{
+    HPX_ASSERT(service_mode_bootstrap == service_type);
 
-    parcelset::parcelport_connection_ptr client_connection;
-
-    bool got_cache_space = false;
-
-    for (std::size_t i = 0; i < HPX_MAX_NETWORK_RETRIES; ++i)
-    {
-        // Get a connection or reserve space for a new connection.
-        if (connection_cache_.get_or_reserve(addr.locality_, client_connection))
-        {
-            got_cache_space = true;
-            break;
-        }
-
-        // Wait for a really short amount of time (usually 100 ms).
-        boost::this_thread::sleep(boost::get_system_time() +
-            boost::posix_time::milliseconds(HPX_NETWORK_RETRIES_SLEEP));
-    }
-
-    // If we didn't get a connection or permission to create one (which is
-    // unlikely), bail.
-    if (!got_cache_space)
-    {
-        HPX_THROW_EXCEPTION(network_error,
-            "big_boot_barrier::apply",
-            "timed out while trying to find room in the connection cache");
-    }
-
-    // Check if we need to create the new connection.
-    if (!client_connection)
-    {
-        // The parcel gets serialized inside the connection constructor, no
-        // need to keep the original parcel alive after this call returned.
-        client_connection.reset(new parcelset::parcelport_connection(
-            io_service_pool_.get_io_service(), addr.locality_,
-            connection_cache_, pp.timer_, pp.parcels_sent_));
-        client_connection->set_parcel(p);
-
-        // Connect to the target locality, retry if needed
-        boost::system::error_code error = boost::asio::error::try_again;
-
-        for (std::size_t i = 0; i < HPX_MAX_NETWORK_RETRIES; ++i)
-        {
-            try
-            { // {{{
-                naming::locality::iterator_type
-                    it = addr.locality_.connect_begin
-                        (io_service_pool_.get_io_service()),
-                    end = addr.locality_.connect_end();
-
-                for (; it != end; ++it)
-                {
-                    client_connection->socket().close();
-                    client_connection->socket().connect(*it, error);
-
-                    if (!error)
-                        break;
-                }
-
-                if (!error)
-                    break;
-
-                // wait for a really short amount of time (usually 100 ms)
-                boost::this_thread::sleep(boost::get_system_time() +
-                    boost::posix_time::milliseconds
-                        (HPX_NETWORK_RETRIES_SLEEP));
-            } // }}}
-
-            catch (boost::system::error_code const& e)
-            {
-                HPX_THROW_EXCEPTION(network_error,
-                    "big_boot_barrier::apply", e.message());
-            }
-        }
-
-        if (error)
-        { // {{{
-            client_connection->socket().close();
-
-            hpx::util::osstream strm;
-            strm << error.message() << " (while trying to connect to: "
-                 << addr.locality_ << ")";
-            HPX_THROW_EXCEPTION(network_error,
-                "big_boot_barrier::get_connection",
-                hpx::util::osstream_get_string(strm));
-        } // }}}
-#if defined(HPX_DEBUG)
-        else
-        {
-            std::string connection_addr = client_connection->socket().remote_endpoint().address().to_string();
-            boost::uint16_t connection_port = client_connection->socket().remote_endpoint().port();
-            BOOST_ASSERT(addr.locality_.get_address() == connection_addr);
-            BOOST_ASSERT(addr.locality_.get_port() == connection_port);
-        }
-#endif
-    }
-
-    else
-    {
-        client_connection->set_parcel(p);
-
-#if defined(HPX_DEBUG)
-        BOOST_ASSERT(addr.locality_ == client_connection->destination());
-
-        std::string connection_addr = client_connection->socket().remote_endpoint().address().to_string();
-        boost::uint16_t connection_port = client_connection->socket().remote_endpoint().port();
-        BOOST_ASSERT(addr.locality_.get_address() == connection_addr);
-        BOOST_ASSERT(addr.locality_.get_port() == connection_port);
-#endif
-    }
-
-    client_connection->async_write(early_write_handler, early_pending_parcel_handler);
+    // the root just waits until all localities have connected
+    spin();
 } // }}}
 
-void big_boot_barrier::wait()
-{ // {{{
-    if (service_mode_bootstrap == service_type)
-        spin();
-
-    else
+namespace detail
+{
+    std::uint32_t get_number_of_pus_in_cores(std::uint32_t num_cores)
     {
-        // allocate our first heap
-        response_heap_type::block_type* p = response_heap_type::alloc_heap();
+        threads::topology& top = threads::create_topology();
 
-        // hosted, console
-        if (runtime_mode_console == runtime_type)
+        std::uint32_t num_pus = 0;
+        for (std::uint32_t i = 0; i != num_cores; ++i)
         {
-            // We need to contact the bootstrap AGAS node, and then wait
-            // for it to signal us. We do this by executing register_console
-            // on the bootstrap AGAS node, and sleeping on this node. We'll
-            // be woken up by notify_console.
+            std::uint32_t num_pus_core = static_cast<std::uint32_t>(
+                top.get_number_of_core_pus(std::size_t(i)));
+            if (num_pus_core == ~std::uint32_t(0))
+                return num_cores;       // assume one pu per core
 
-            apply(0, bootstrap_agas,
-                new actions::transfer_action<register_console_action>(
-                    registration_header
-                        (get_runtime().here(),
-                         HPX_INITIAL_GID_RANGE,
-                         response_heap_type::block_type::heap_step,
-                         p->get_address(),
-                         response_heap_type::block_type::heap_size,
-                         reinterpret_cast<std::size_t>(p),
-                         get_runtime().get_runtime_support_lva(),
-                         get_runtime().get_memory_lva())));
-            spin();
+            num_pus += num_pus_core;
         }
 
-        // hosted, worker or connected
-        else
-        {
-            // we need to contact the bootstrap AGAS node, and then wait
-            // for it to signal us.
-
-            apply(0, bootstrap_agas,
-                new actions::transfer_action<register_worker_action>(
-                    registration_header
-                        (get_runtime().here(),
-                         HPX_INITIAL_GID_RANGE,
-                         response_heap_type::block_type::heap_step,
-                         p->get_address(),
-                         response_heap_type::block_type::heap_size,
-                         reinterpret_cast<std::size_t>(p),
-                         get_runtime().get_runtime_support_lva(),
-                         get_runtime().get_memory_lva())));
-            spin();
-        }
+        return num_pus;
     }
+}
+
+void big_boot_barrier::wait_hosted(
+    std::string const& locality_name,
+    naming::address::address_type primary_ns_server,
+    naming::address::address_type symbol_ns_server)
+{ // {{{
+    HPX_ASSERT(service_mode_bootstrap != service_type);
+
+    // any worker sends a request for registration and waits
+    HPX_ASSERT(0 != primary_ns_server);
+    HPX_ASSERT(0 != symbol_ns_server);
+
+    runtime_distributed& rtd = get_runtime_distributed();
+
+    // get the number of cores we need for our locality. This respects the
+    // affinity description. Cores that are partially used are counted as well
+    std::uint32_t cores_needed = rtd.assign_cores();
+    std::uint32_t num_threads =
+        std::uint32_t(rtd.get_config().get_os_thread_count());
+
+    naming::gid_type suggested_prefix;
+
+    std::string locality_str = rtd.get_config().get_entry("hpx.locality", "-1");
+    if(locality_str != "-1")
+    {
+        suggested_prefix = naming::get_gid_from_locality_id(
+            util::from_string<std::uint32_t>(locality_str, -1));
+    }
+
+    // pre-load all unassigned ids
+    detail::unassigned_typename_sequence unassigned(true);
+
+    // contact the bootstrap AGAS node
+    registration_header hdr(
+          rtd.endpoints()
+        , primary_ns_server
+        , symbol_ns_server
+        , cores_needed
+        , num_threads
+        , locality_name
+        , unassigned
+        , suggested_prefix);
+
+    apply(
+          static_cast<std::uint32_t>(std::random_device{}()) // random first parcel id
+        , 0
+        , bootstrap_agas
+        , register_worker_action()
+        , std::move(hdr));
+
+    // wait for registration to be complete
+    spin();
 } // }}}
 
 void big_boot_barrier::notify()
 {
-    boost::mutex::scoped_lock lk(mtx, boost::adopt_lock);
-    --connected;
-    cond.notify_all();
+    runtime_distributed& rtd = get_runtime_distributed();
+    naming::resolver_client& agas_client = rtd.get_agas_client();
+
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lk(mtx, std::adopt_lock);
+        if (agas_client.get_status() == state_starting)
+        {
+            --connected;
+            if (connected == 0)
+                notify = true;
+        }
+    }
+    if (notify)
+        cond.notify_all();
 }
 
 // This is triggered in runtime_impl::start, after the early action handler
@@ -784,33 +825,57 @@ void big_boot_barrier::trigger()
 {
     if (service_mode_bootstrap == service_type)
     {
-        HPX_STD_FUNCTION<void()>* p;
+        util::unique_function_nonser<void()>* p;
 
-        while (thunks.dequeue(p))
-            (*p)();
+        while (thunks.pop(p))
+        {
+            try
+            {
+                (*p)();
+            }
+            catch(...)
+            {
+                delete p;
+                throw;
+            }
+            delete p;
+        }
     }
 }
 
+void big_boot_barrier::add_thunk(util::unique_function_nonser<void()>* f)
+{
+    std::size_t k = 0;
+    while (!thunks.push(f))
+    {
+        // Wait until successfully pushed ...
+        hpx::util::detail::yield_k(
+            k, "hpx::agas::big_boot_barrier::add_thunk");
+        ++k;
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
 struct bbb_tag;
 
 void create_big_boot_barrier(
-    parcelset::parcelport& pp_
+    parcelset::parcelport *pp_
+  , parcelset::endpoints_type const& endpoints_
   , util::runtime_configuration const& ini_
-  , runtime_mode runtime_type_
 ) {
-    util::static_<boost::shared_ptr<big_boot_barrier>, bbb_tag> bbb;
+    util::reinitializable_static<std::shared_ptr<big_boot_barrier>, bbb_tag> bbb;
     if (bbb.get())
     {
         HPX_THROW_EXCEPTION(internal_server_error,
             "create_big_boot_barrier",
             "create_big_boot_barrier was called more than once");
     }
-    bbb.get().reset(new big_boot_barrier(pp_, ini_, runtime_type_));
+    bbb.get().reset(new big_boot_barrier(pp_, endpoints_, ini_));
 }
 
 void destroy_big_boot_barrier()
 {
-    util::static_<boost::shared_ptr<big_boot_barrier>, bbb_tag> bbb;
+    util::reinitializable_static<std::shared_ptr<big_boot_barrier>, bbb_tag> bbb;
     if (!bbb.get())
     {
         HPX_THROW_EXCEPTION(internal_server_error,
@@ -822,7 +887,7 @@ void destroy_big_boot_barrier()
 
 big_boot_barrier& get_big_boot_barrier()
 {
-    util::static_<boost::shared_ptr<big_boot_barrier>, bbb_tag> bbb;
+    util::reinitializable_static<std::shared_ptr<big_boot_barrier>, bbb_tag> bbb;
     if (!bbb.get())
     {
         HPX_THROW_EXCEPTION(internal_server_error,
@@ -834,3 +899,4 @@ big_boot_barrier& get_big_boot_barrier()
 
 }}
 
+#endif

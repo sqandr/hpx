@@ -1,17 +1,18 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c) 2011 Bryce Adelstein-Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
-#if !defined(HPX_4D9DE0AC_4362_4DAB_A061_2D3643CE4FCB)
-#define HPX_4D9DE0AC_4362_4DAB_A061_2D3643CE4FCB
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
+#include <hpx/hpx.hpp>
 #include <hpx/include/async.hpp>
 #include <hpx/runtime/components/stubs/stub_base.hpp>
-#include <tests/unit/agas/components/server/managed_refcnt_checker.hpp>
+
+#include "../server/managed_refcnt_checker.hpp"
 
 namespace hpx { namespace test { namespace stubs
 {
@@ -40,5 +41,4 @@ struct managed_refcnt_checker
 
 }}}
 
-#endif // HPX_4D9DE0AC_4362_4DAB_A061_2D3643CE4FCB
 

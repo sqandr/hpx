@@ -1,60 +1,78 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c)      2014 Thomas Heller
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //  Copyright (c)      2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_PARCELSET_PARCELHANDLER_MAY_18_2008_0935AM)
-#define HPX_PARCELSET_PARCELHANDLER_MAY_18_2008_0935AM
+#pragma once
 
-#include <boost/noncopyable.hpp>
-#include <boost/bind.hpp>
+#include <hpx/config.hpp>
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/exception.hpp>
-#include <hpx/runtime/naming/name.hpp>
+#if defined(HPX_HAVE_NETWORKING)
+#include <hpx/assert.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/functional/bind_front.hpp>
+#include <hpx/synchronization/spinlock.hpp>
+#include <hpx/modules/logging.hpp>
+#include <hpx/async_distributed/applier/applier.hpp>
 #include <hpx/runtime/naming/address.hpp>
-#include <hpx/runtime/naming/locality.hpp>
-
+#include <hpx/runtime/naming/name.hpp>
+#include <hpx/runtime/parcelset/locality.hpp>
 #include <hpx/runtime/parcelset/parcelport.hpp>
-#include <hpx/runtime/parcelset/parcelhandler_queue_base.hpp>
-#include <hpx/util/high_resolution_timer.hpp>
-#include <hpx/util/logging.hpp>
+#include <hpx/runtime_fwd.hpp>
+#include <hpx/timing/high_resolution_timer.hpp>
+
+#include <hpx/plugins/parcelport_factory_base.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <hpx/config/warnings_prefix.hpp>
 
 namespace hpx { namespace parcelset
 {
+    // default callback for put_parcel
+    void default_write_handler(boost::system::error_code const&,
+        parcel const& p);
+
     /// The \a parcelhandler is the representation of the parcelset inside a
     /// locality. It is built on top of a single parcelport. Several
     /// parcel-handlers may be connected to a single parcelport.
-    class HPX_EXPORT parcelhandler : boost::noncopyable
+    class HPX_EXPORT parcelhandler
     {
-    private:
-        static void default_write_handler(boost::system::error_code const&,
-            std::size_t /*size*/) {}
+    public:
+        HPX_NON_COPYABLE(parcelhandler);
 
-        void parcel_sink(parcelport& pp,
-            boost::shared_ptr<std::vector<char> > parcel_data,
-            threads::thread_priority priority,
-            performance_counters::parcels::data_point const& receive_data);
+    private:
+        void parcel_sink(parcel const& p);
 
         threads::thread_state_enum decode_parcel(
-            boost::shared_ptr<std::vector<char> > parcel_data,
+            parcelport& pp, std::shared_ptr<std::vector<char> > parcel_data,
             performance_counters::parcels::data_point receive_data);
 
         // make sure the parcel has been properly initialized
-        void init_parcel(parcel& p)
-        {
-            // ensure the source locality id is set (if no component id is given)
-            if (!p.get_source())
-                p.set_source(naming::id_type(locality_, naming::id_type::unmanaged));
+        void init_parcel(parcel& p);
 
-            // set the current local time for this locality
-            p.set_start_time(get_current_time());
-        }
+        typedef lcos::local::spinlock mutex_type;
 
     public:
+
+        typedef std::pair<locality, std::string> handler_key_type;
+        typedef std::map<
+            handler_key_type, std::shared_ptr<policies::message_handler> >
+        message_handler_map;
+
         typedef parcelport::read_handler_type read_handler_type;
         typedef parcelport::write_handler_type write_handler_type;
 
@@ -69,12 +87,27 @@ namespace hpx { namespace parcelset
         ///                 parcelhandler is connected to. This \a parcelport
         ///                 instance will be used for any parcel related
         ///                 transport operations the parcelhandler carries out.
-        parcelhandler(naming::resolver_client& resolver, parcelport& pp,
-            threads::threadmanager_base* tm, parcelhandler_queue_base* policy);
+        parcelhandler(util::runtime_configuration& cfg,
+            threads::threadmanager* tm,
+            threads::policies::callback_notifier const& notifier);
 
-        ~parcelhandler()
-        {
-        }
+        ~parcelhandler() = default;
+
+        std::shared_ptr<parcelport> get_bootstrap_parcelport() const;
+
+        void initialize(naming::resolver_client &resolver, applier::applier *applier);
+
+        void flush_parcels();
+
+        /// \brief Stop all parcel ports associated with this parcelhandler
+        void stop(bool blocking = true);
+
+        /// \brief do background work in the parcel layer
+        ///
+        /// \returns Whether any work has been performed
+        bool do_background_work(std::size_t num_thread = 0,
+            bool stop_buffering = false,
+            parcelport_background_mode mode = parcelport_background_mode_all);
 
         /// \brief Allow access to AGAS resolver instance.
         ///
@@ -83,35 +116,6 @@ namespace hpx { namespace parcelset
         /// parcelhandler constructors). This is the same resolver instance
         /// this parcelhandler has been initialized with.
         naming::resolver_client& get_resolver();
-
-        /// Allow access to parcelport instance.
-        ///
-        /// This accessor returns a reference to the parcelport object
-        /// the parcelhandler has been initialized with (see parcelhandler
-        /// constructors). This is the same \a parcelport instance this
-        /// parcelhandler has been initialized with.
-        parcelport& get_parcelport()
-        {
-            return pp_;
-        }
-
-        /// Return the locality_id of this locality
-        ///
-        /// This accessor allows to retrieve the locality_id value being assigned to
-        /// the locality this parcelhandler is associated with. This returns the
-        /// same value as would be returned by:
-        ///
-        /// \code
-        ///     naming::id_type locality_id;
-        ///     get_resolver().get_locality_id(here, locality_id);
-        /// \endcode
-        ///
-        /// but doesn't require the full AGAS round trip as the prefix value
-        /// is cached inside the parcelhandler.
-        naming::gid_type const& get_locality() const
-        {
-            return locality_;
-        }
 
         /// Return the list of all remote localities supporting the given
         /// component type
@@ -125,7 +129,8 @@ namespace hpx { namespace parcelset
         ///          remote locality known by AGAS
         ///          (!prefixes.empty()).
         bool get_raw_remote_localities(std::vector<naming::gid_type>& locality_ids,
-            components::component_type type = components::component_invalid) const;
+            components::component_type type = components::component_invalid,
+            error_code& ec = throws) const;
 
         /// Return the list of all localities supporting the given
         /// component type
@@ -139,7 +144,7 @@ namespace hpx { namespace parcelset
         ///          locality known by AGAS
         ///          (!prefixes.empty()).
         bool get_raw_localities(std::vector<naming::gid_type>& locality_ids,
-            components::component_type type = components::component_invalid) const;
+            components::component_type type, error_code& ec = throws) const;
 
         /// A parcel is submitted for transport at the source locality site to
         /// the parcel set of the locality with the put-parcel command
@@ -153,7 +158,7 @@ namespace hpx { namespace parcelset
         ///                 transmitted. The parcel \a p will be modified in
         ///                 place, as it will get set the resolved destination
         ///                 address and parcel id (if not already set).
-        void sync_put_parcel(parcel& p);
+        void sync_put_parcel(parcel p);
 
         /// A parcel is submitted for transport at the source locality site to
         /// the parcel set of the locality with the put-parcel command
@@ -177,10 +182,10 @@ namespace hpx { namespace parcelset
         ///                 where \a err is the status code of the operation and
         ///                       \a size is the number of successfully
         ///                              transferred bytes.
-        void put_parcel(parcel& p, write_handler_type f);
+        void put_parcel(parcel p, write_handler_type f);
 
         /// This put_parcel() function overload is asynchronous, but no
-        /// callback functor is provided by the user.
+        /// callback is provided by the user.
         ///
         /// \note   The function \a put_parcel() is asynchronous.
         ///
@@ -188,166 +193,317 @@ namespace hpx { namespace parcelset
         ///                 parcel \a p will be modified in place, as it will
         ///                 get set the resolved destination address and parcel
         ///                 id (if not already set).
-        void put_parcel(parcel& p)
-        { put_parcel(p, &parcelhandler::default_write_handler); }
-
-        /// The function \a get_parcel returns the next available parcel
-        ///
-        /// \param p        [out] The parcel instance to be filled with the
-        ///                 received parcel. If the functioned returns \a true
-        ///                 this will be the next received parcel.
-        ///
-        /// \returns        Returns \a true if the next parcel has been
-        ///                 retrieved successfully. The reference given by
-        ///                 parameter \a p will be initialized with the
-        ///                 received parcel data.
-        ///                 Return \a false if no parcel is available in the
-        ///                 parcelhandler, the reference \a p is not touched.
-        ///
-        /// The returned parcel will be no longer available from the
-        /// parcelhandler as it is removed from the internal queue of received
-        /// parcels.
-        bool get_parcel(parcel& p)
+        HPX_FORCEINLINE void put_parcel(parcel p)
         {
-            return parcels_->get_parcel(p);
+            auto f = [this](boost::system::error_code const& ec,
+                         parcel const& p) -> void {
+                invoke_write_handler(ec, p);
+            };
+
+            put_parcel(std::move(p), std::move(f));
         }
 
-        /// The function \a get_parcel returns the next available parcel
+        /// A parcel is submitted for transport at the source locality site to
+        /// the parcel set of the locality with the put-parcel command
+        //
+        /// \note The function \a put_parcel() is asynchronous, the provided
+        /// function or function object gets invoked on completion of the send
+        /// operation or on any error.
         ///
-        /// \param p        [out] The parcel instance to be filled with the
-        ///                 received parcel. If the functioned returns \a true
-        ///                 this will be the next received parcel.
-        /// \param parcel_id  [in] The id of the parcel to fetch
-        ///
-        /// \returns        Returns \a true if the parcel with the given id
-        ///                 has been retrieved successfully. The reference
-        ///                 given by parameter \a p will be initialized with
-        ///                 the received parcel data.
-        ///                 Return \a false if no parcel is available in the
-        ///                 parcelhandler, the reference \a p is not touched.
-        ///
-        /// The returned parcel will be no longer available from the
-        /// parcelhandler as it is removed from the internal queue of received
-        /// parcels.
-        bool get_parcel(parcel& p, naming::gid_type const& parcel_id)
-        {
-            return parcels_->get_parcel(p, parcel_id);
-        }
-
-        /// Register an event handler to be called whenever a parcel has been
-        /// received
-        ///
-        /// \param sink     [in] A function object to be invoked whenever a
-        ///                 parcel has been received by the parcelhandler. It is
-        ///                 possible to register more than one (different)
-        ///                 function object. The signature of this function
-        ///                 object is expected to be:
+        /// \param p        [in] The parcels to send.
+        /// \param f        [in] The function objects to be invoked on
+        ///                 successful completion or on errors. The signature
+        ///                 of these function object are expected to be:
         ///
         /// \code
-        ///      void sink (hpx::parcelset::parcelhandler& pp
-        ///                 hpx::naming::address const&);
+        ///     void f (boost::system::error_code const& err, std::size_t );
         /// \endcode
         ///
-        ///                 where \a pp is a reference to the parcelhandler this
-        ///                 function object instance is invoked by, and \a dest
-        ///                 is the local destination address of the parcel.
-        bool register_event_handler(
-            parcelhandler_queue_base::callback_type const& sink)
-        {
-            return parcels_->register_event_handler(sink);
-        }
+        ///                 where \a err is the status code of the operation and
+        ///                       \a size is the number of successfully
+        ///                              transferred bytes.
+        void put_parcels(std::vector<parcel> p, std::vector<write_handler_type> f);
 
-        /// Register an event handler to be called whenever a parcel has been
-        /// received
+        /// This put_parcel() function overload is asynchronous, but no
+        /// callback is provided by the user.
         ///
-        /// \param sink     [in] A function object to be invoked whenever a
-        ///                 parcel has been received by the parcelhandler. It is
-        ///                 possible to register more than one (different)
-        ///                 function object. The signature of this function
-        ///                 object is expected to be:
+        /// \note   The function \a put_parcel() is asynchronous.
         ///
-        /// \code
-        ///      void sink (hpx::parcelset::parcelhandler& pp
-        ///                 hpx::naming::address const&);
-        /// \endcode
-        ///
-        ///                 where \a pp is a reference to the parcelhandler this
-        ///                 function object instance is invoked by, and \a dest
-        ///                 is the local destination address of the parcel.
-        /// \param conn     [in] A instance of a unspecified type allowing to
-        ///                 manage the lifetime of the established connection.
-        ///                 The easiest way is to pass an instance of \a
-        ///                 scoped_connection_type allowing to automatically
-        ///                 unregister this connection whenever the connection
-        ///                 instance goes out of scope.
-        bool register_event_handler(
-            parcelhandler_queue_base::callback_type const& sink
-          , parcelhandler_queue_base::connection_type& conn)
+        /// \param p        [in, out] A reference to the parcel to send. The
+        ///                 parcel \a p will be modified in place, as it will
+        ///                 get set the resolved destination address and parcel
+        ///                 id (if not already set).
+        void put_parcels(std::vector<parcel> parcels)
         {
-            return parcels_->register_event_handler(sink, conn);
-        }
+            std::vector<write_handler_type> handlers(parcels.size(),
+                [this](boost::system::error_code const& ec, parcel const& p)
+                    -> void { return invoke_write_handler(ec, p); });
 
-        /// The 'scoped_connection_type' typedef simplifies to manage registered
-        /// event handlers. Instances of this type may be passed as the second
-        /// parameter to the \a register_event_handler() function
-        typedef parcelhandler_queue_base::connection_type scoped_connection_type;
+            put_parcels(std::move(parcels), std::move(handlers));
+        }
 
         double get_current_time() const
         {
-            return startup_time_ + timer_.elapsed();
+            return util::high_resolution_timer::now();
         }
 
-        /// \brief Allow access to the locality of the parcelport this
-        /// parcelhandler is associated with.
-        ///
-        /// This accessor returns a reference to the locality of the parcelport
-        /// this parcelhandler is associated with.
-        naming::locality const& here() const
+        /// \brief Factory function used in serialization to create a given
+        /// locality endpoint
+        locality create_locality(std::string const & name) const
         {
-            return pp_.here();
+            return find_parcelport(name)->create_locality();
         }
 
+        /// Return the name of this locality as retrieved from the active
+        /// parcelport
+        std::string get_locality_name() const;
+
+        ///////////////////////////////////////////////////////////////////////
         /// The function register_counter_types() is called during startup to
         /// allow the registration of all performance counter types for this
         /// parcel-handler instance.
         void register_counter_types();
 
-    protected:
-        std::size_t get_incoming_queue_length() const
+        /// \brief Make sure the specified locality is not held by any
+        /// connection caches anymore
+        void remove_from_connection_cache(naming::gid_type const& gid,
+            endpoints_type const& endpoints);
+
+        /// \brief return the endpoints associated with this parcelhandler
+        /// \returns all connection information for the enabled parcelports
+        endpoints_type const & endpoints() const
         {
-            return parcels_->get_queue_length();
+            return endpoints_;
         }
 
-        std::size_t get_outgoing_queue_length() const
+        void enable_alternative_parcelports()
         {
-            return pp_.get_pending_parcels_count();
+            use_alternative_parcelports_.store(true);
         }
+
+        void disable_alternative_parcelports()
+        {
+            use_alternative_parcelports_.store(false);
+        }
+
+        /// Return the reference to an existing io_service
+        util::io_service_pool* get_thread_pool(char const* name);
+
+        ///////////////////////////////////////////////////////////////////////
+        policies::message_handler* get_message_handler(char const* action,
+            char const* message_handler_type, std::size_t num_messages,
+             std::size_t interval, locality const& loc,
+             error_code& ec = throws);
+
+        ///////////////////////////////////////////////////////////////////////
+        // Performance counter data
+
+        // number of parcels sent
+        std::int64_t get_parcel_send_count(
+            std::string const& pp_type, bool reset) const;
+
+        // number of messages sent
+        std::int64_t get_message_send_count(
+            std::string const& pp_type, bool reset) const;
+
+        // number of parcels routed
+        std::int64_t get_parcel_routed_count(bool reset);
+
+        // number of parcels received
+        std::int64_t get_parcel_receive_count(
+            std::string const& pp_type, bool reset) const;
+
+        // number of messages received
+        std::int64_t get_message_receive_count(
+            std::string const& pp_type, bool reset) const;
+
+        // the total time it took for all sends, from async_write to the
+        // completion handler (nanoseconds)
+        std::int64_t get_sending_time(
+            std::string const& pp_type, bool reset) const;
+
+        // the total time it took for all receives, from async_read to the
+        // completion handler (nanoseconds)
+        std::int64_t get_receiving_time(
+            std::string const& pp_type, bool reset) const;
+
+        // the total time it took for all sender-side serialization operations
+        // (nanoseconds)
+        std::int64_t get_sending_serialization_time(
+            std::string const& pp_type, bool reset) const;
+
+        // the total time it took for all receiver-side serialization
+        // operations (nanoseconds)
+        std::int64_t get_receiving_serialization_time(
+            std::string const& pp_type, bool reset) const;
+
+        // total data sent (bytes)
+        std::int64_t get_data_sent(
+            std::string const& pp_type, bool reset) const;
+
+        // total data (uncompressed) sent (bytes)
+        std::int64_t get_raw_data_sent(
+            std::string const& pp_type, bool reset) const;
+
+        // total data received (bytes)
+        std::int64_t get_data_received(
+            std::string const& pp_type, bool reset) const;
+
+        // total data (uncompressed) received (bytes)
+        std::int64_t get_raw_data_received(
+            std::string const& pp_type, bool reset) const;
+
+        std::int64_t get_buffer_allocate_time_sent(
+            std::string const& pp_type, bool reset) const;
+
+        std::int64_t get_buffer_allocate_time_received(
+            std::string const& pp_type, bool reset) const;
+
+#if defined(HPX_HAVE_PARCELPORT_ACTION_COUNTERS)
+        // same as above, just separated data for each action
+        // number of parcels sent
+        std::int64_t get_action_parcel_send_count(
+            std::string const& pp_type, std::string const& action,
+            bool reset) const;
+
+        // number of parcels received
+        std::int64_t get_action_parcel_receive_count(
+            std::string const& pp_type, std::string const& action,
+            bool reset) const;
+
+        // the total time it took for all sender-side serialization operations
+        // (nanoseconds)
+        std::int64_t get_action_sending_serialization_time(
+            std::string const& pp_type, std::string const& action,
+            bool reset) const;
+
+        // the total time it took for all receiver-side serialization
+        // operations (nanoseconds)
+        std::int64_t get_action_receiving_serialization_time(
+            std::string const& pp_type, std::string const& action,
+            bool reset) const;
+
+        // total data sent (bytes)
+        std::int64_t get_action_data_sent(std::string const& pp_type,
+            std::string const& action, bool reset) const;
+
+        // total data received (bytes)
+        std::int64_t get_action_data_received(std::string const& pp_type,
+            std::string const& action, bool reset) const;
+#endif
+
+        //
+        std::int64_t get_connection_cache_statistics(std::string const& pp_type,
+            parcelport::connection_cache_statistics_type stat_type, bool) const;
+
+        void list_parcelports(std::ostringstream& strm) const;
+        void list_parcelport(std::ostringstream& strm,
+            std::string const& ppname, int priority, bool bootstrap) const;
+
+        // manage default exception handler
+        void invoke_write_handler(
+            boost::system::error_code const& ec, parcel const & p) const
+        {
+            write_handler_type f;
+            {
+                std::lock_guard<mutex_type> l(mtx_);
+                f = write_handler_;
+            }
+            f(ec, p);
+        }
+
+        write_handler_type set_write_handler(write_handler_type f)
+        {
+            std::lock_guard<mutex_type> l(mtx_);
+            std::swap(f, write_handler_);
+            return f;
+        }
+
+    protected:
+        std::int64_t get_incoming_queue_length(bool /*reset*/) const
+        {
+            return 0;
+        }
+
+        std::int64_t get_outgoing_queue_length(bool reset) const;
+
+        std::pair<std::shared_ptr<parcelport>, locality>
+        find_appropriate_destination(naming::gid_type const & dest_gid);
+        locality find_endpoint(endpoints_type const & eps, std::string const & name);
+
+        void register_counter_types(std::string const& pp_type);
+        void register_connection_cache_counter_types(std::string const& pp_type);
 
     private:
-        /// The AGAS client
-        naming::resolver_client& resolver_;
+        int get_priority(std::string const& name) const
+        {
+            std::map<std::string, int>::const_iterator it = priority_.find(name);
+            if(it == priority_.end()) return 0;
+            return it->second;
+        }
 
-        /// The site prefix of the locality
-        naming::gid_type locality_;
+        parcelport *find_parcelport(std::string const& type, error_code& = throws) const
+        {
+            int priority = get_priority(type);
+            if(priority <= 0) return nullptr;
+            HPX_ASSERT(pports_.find(priority) != pports_.end());
+            return pports_.find(priority)->second.get();    // -V783
+        }
+
+        /// \brief Attach the given parcel port to this handler
+        void attach_parcelport(std::shared_ptr<parcelport> const& pp);
+
+        /// The AGAS client
+        naming::resolver_client *resolver_;
 
         /// the parcelport this handler is associated with
-        parcelport& pp_;
+        using pports_type = std::map<int, std::shared_ptr<parcelport>,
+            std::greater<int> >;
+        pports_type pports_;
+
+        std::map<std::string, int> priority_;
+
+        /// the endpoints corresponding to the parcel-ports
+        endpoints_type endpoints_;
 
         /// the thread-manager to use (optional)
-        threads::threadmanager_base* tm_;
+        threads::threadmanager* tm_;
 
-        ///
-        boost::shared_ptr<parcelhandler_queue_base> parcels_;
+        /// Allow to use alternative parcel-ports (this is enabled only after
+        /// the runtime systems of all localities are guaranteed to have
+        /// reached a certain state).
+        std::atomic<bool> use_alternative_parcelports_;
+        std::atomic<bool> enable_parcel_handling_;
 
-        /// This is the timer instance for this parcelhandler
-        double startup_time_;
-        util::high_resolution_timer timer_;
+        /// Store message handlers for actions
+        mutex_type handlers_mtx_;
+        message_handler_map handlers_;
+        bool const load_message_handlers_;
+
+        /// Count number of (outbound) parcels routed
+        std::atomic<std::int64_t> count_routed_;
+
+        /// global exception handler for unhandled exceptions thrown from the
+        /// parcel layer
+        mutable mutex_type mtx_;
+        write_handler_type write_handler_;
+
+        /// cache whether networking has been enabled
+        bool is_networking_enabled_;
+
+    public:
+        static std::vector<plugins::parcelport_factory_base *> &
+            get_parcelport_factories();
+
+        static void add_parcelport_factory(plugins::parcelport_factory_base *);
+
+        static void init(int *argc, char ***argv, util::command_line_handling &cfg);
     };
 
+    std::vector<std::string> load_runtime_configuration();
 }}
 
 #include <hpx/config/warnings_suffix.hpp>
 
 #endif
-
 

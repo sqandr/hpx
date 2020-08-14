@@ -1,21 +1,27 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //  Copyright (c)      2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/state.hpp>
-#include <hpx/runtime.hpp>
-#include <hpx/exception.hpp>
-#include <hpx/util/serialize_sequence.hpp>
+#include <hpx/config.hpp>
+#include <hpx/assert.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/runtime_local/runtime_local.hpp>
+#include <hpx/runtime/actions/continuation.hpp>
+#include <hpx/runtime/agas/addressing_service.hpp>
+#include <hpx/async_distributed/applier/apply.hpp>
 #include <hpx/runtime/components/console_logging.hpp>
 #include <hpx/runtime/components/server/console_logging.hpp>
-#include <hpx/runtime/components/plain_component_factory.hpp>
-#include <hpx/runtime/actions/continuation.hpp>
+#include <hpx/state.hpp>
+#include <hpx/static_reinit/reinitializable_static.hpp>
+#include <hpx/datastructures/tuple.hpp>
+#include <hpx/thread_support/unlock_guard.hpp>
 
-#include <boost/fusion/include/at_c.hpp>
-#include <boost/assert.hpp>
+#include <cstddef>
+#include <mutex>
+#include <string>
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace hpx { namespace components
@@ -23,7 +29,7 @@ namespace hpx { namespace components
     void fallback_console_logging_locked(messages_type const& msgs,
         std::string fail_msg = "")
     {
-        using boost::fusion::at_c;
+        using hpx::util::get;
 
         if (!fail_msg.empty())
             fail_msg = "Logging failed due to: " + fail_msg + "\n";
@@ -31,22 +37,30 @@ namespace hpx { namespace components
         for (std::size_t i = 0; i != msgs.size(); ++i)
         {
             message_type const& msg = msgs[i];
-            switch (at_c<0>(msg)) {
+            switch (get<0>(msg)) {
             default:
             case destination_hpx:
-                LHPX_CONSOLE_(at_c<1>(msg)) << fail_msg << at_c<2>(msg);
+                LHPX_CONSOLE_(get<1>(msg)) << fail_msg << get<2>(msg);
                 break;
 
             case destination_timing:
-                LTIM_CONSOLE_(at_c<1>(msg)) << fail_msg << at_c<2>(msg);
+                LTIM_CONSOLE_(get<1>(msg)) << fail_msg << get<2>(msg);
                 break;
 
             case destination_agas:
-                LAGAS_CONSOLE_(at_c<1>(msg)) << fail_msg << at_c<2>(msg);
+                LAGAS_CONSOLE_(get<1>(msg)) << fail_msg << get<2>(msg);
+                break;
+
+            case destination_parcel:
+                LPT_CONSOLE_(get<1>(msg)) << fail_msg << get<2>(msg);
                 break;
 
             case destination_app:
-                LAPP_CONSOLE_(at_c<1>(msg)) << fail_msg << at_c<2>(msg);
+                LAPP_CONSOLE_(get<1>(msg)) << fail_msg << get<2>(msg);
+                break;
+
+            case destination_debuglog:
+                LDEB_CONSOLE_ << fail_msg << get<2>(msg);
                 break;
             }
         }
@@ -83,13 +97,14 @@ namespace hpx { namespace components
 
     bool pending_logs::is_active()
     {
-        return threads::threadmanager_is(running) && threads::get_self_ptr() &&
+        return threads::get_self_ptr() &&
+            threads::threadmanager_is(state_running) &&
             activated_.load();
     }
 
     void pending_logs::add(message_type const& msg)
     {
-        if (0 == hpx::get_runtime_ptr()) {
+        if (nullptr == hpx::get_runtime_ptr()) {
             // This branch will be taken if it's too early or too late in the
             // game. We do local logging only. Any queued messages which may be
             // still left in the queue are logged locally as well.
@@ -97,7 +112,7 @@ namespace hpx { namespace components
             // queue up the new message and log it with the rest of it
             messages_type msgs;
             {
-                queue_mutex_type::scoped_lock l(queue_mtx_);
+                std::lock_guard<queue_mutex_type> l(queue_mtx_);
                 queue_.push_back(msg);
                 queue_.swap(msgs);
             }
@@ -113,7 +128,7 @@ namespace hpx { namespace components
             std::size_t size = 0;
 
             {
-                queue_mutex_type::scoped_lock l(queue_mtx_);
+                std::lock_guard<queue_mutex_type> l(queue_mtx_);
                 queue_.push_back(msg);
                 size = queue_.size();
             }
@@ -132,20 +147,22 @@ namespace hpx { namespace components
             if (!naming::get_agas_client().is_console())
             {
                 // queue it for delivery to the console
-                queue_mutex_type::scoped_lock l(queue_mtx_);
+                std::lock_guard<queue_mutex_type> l(queue_mtx_);
                 queue_.push_back(msg);
             }
-
-            // and log it locally
-            messages_type msgs;
-            msgs.push_back(msg);
-            fallback_console_logging_locked(msgs);
+            else
+            {
+                // log it locally on the console
+                messages_type msgs;
+                msgs.push_back(msg);
+                fallback_console_logging_locked(msgs);
+            }
         }
     }
 
     void pending_logs::cleanup()
     {
-        if (threads::threadmanager_is(running) && threads::get_self_ptr())
+        if (threads::threadmanager_is(state_running) && threads::get_self_ptr())
         {
             send();
         }
@@ -153,7 +170,7 @@ namespace hpx { namespace components
         {
             messages_type msgs;
             {
-                queue_mutex_type::scoped_lock l(queue_mtx_);
+                std::lock_guard<queue_mutex_type> l(queue_mtx_);
                 if (queue_.empty())
                     return;         // some other thread did the deed
                 queue_.swap(msgs);
@@ -168,14 +185,23 @@ namespace hpx { namespace components
         // Resolve the console prefix if it's still invalid.
         if (HPX_UNLIKELY(naming::invalid_id == prefix_))
         {
-            prefix_mutex_type::scoped_try_lock l(prefix_mtx_);
+            std::unique_lock<prefix_mutex_type> l(prefix_mtx_, std::try_to_lock);
 
             if (l.owns_lock() && (naming::invalid_id == prefix_))
             {
                 naming::gid_type raw_prefix;
-                naming::get_agas_client().get_console_locality(raw_prefix);
-                BOOST_ASSERT(naming::invalid_gid != raw_prefix);
-                prefix_ = naming::id_type(raw_prefix, naming::id_type::unmanaged);
+                {
+                    util::unlock_guard<std::unique_lock<prefix_mutex_type> > ul(l);
+                    naming::get_agas_client().get_console_locality(raw_prefix);
+                }
+
+                HPX_ASSERT(naming::invalid_gid != raw_prefix);
+                if (!prefix_) {
+                    prefix_ = naming::id_type(raw_prefix, naming::id_type::unmanaged);
+                }
+                else {
+                    HPX_ASSERT(prefix_.get_gid() == raw_prefix);
+                }
             }
 
             // Someone else started getting the console prefix.
@@ -189,20 +215,38 @@ namespace hpx { namespace components
     void pending_logs::send()
     {
         // WARNING: Never, ever call this outside of a HPX-thread.
-        BOOST_ASSERT(threads::get_self_ptr());
+        HPX_ASSERT(threads::get_self_ptr());
 
-        if (!ensure_prefix())
-            return;             // some other thread tries to do logging
+        bool expected = false;
+        if (!is_sending_.compare_exchange_strong(expected, true))
+            return;
 
-        messages_type msgs;
-        {
-            queue_mutex_type::scoped_lock l(queue_mtx_);
-            if (queue_.empty())
-                return;         // some other thread did the deed
-            queue_.swap(msgs);
+        try {
+            {
+                std::lock_guard<queue_mutex_type> l(queue_mtx_);
+                if (queue_.empty())
+                    return;         // some other thread did the deed
+            }
+
+            if (!ensure_prefix())
+                return;             // some other thread tries to do logging
+
+            messages_type msgs;
+            {
+                std::lock_guard<queue_mutex_type> l(queue_mtx_);
+                if (queue_.empty())
+                    return;         // some other thread did the deed
+                queue_.swap(msgs);
+            }
+
+            console_logging_locked(prefix_, msgs);
+        }
+        catch(...) {
+            is_sending_ = false;
+            throw;
         }
 
-        console_logging_locked(prefix_, msgs);
+        is_sending_ = false;
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -210,7 +254,7 @@ namespace hpx { namespace components
     {
         pending_logs& logger()
         {
-            util::static_<pending_logs, pending_logs_tag> logs;
+            util::reinitializable_static<pending_logs, pending_logs_tag> logs;
             return logs.get();
         }
     }

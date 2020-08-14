@@ -1,21 +1,25 @@
 # Copyright (c) 2007-2012 Hartmut Kaiser
 # Copyright (c) 2011      Bryce Lelbach
 #
+# SPDX-License-Identifier: BSL-1.0
 # Distributed under the Boost Software License, Version 1.0. (See accompanying
 # file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-set(HPX_ADDLIBRARYSOURCES_LOADED TRUE)
-
-hpx_include(Message
-            ParseArguments)
-
-macro(add_hpx_library_sources name globtype)
-  hpx_parse_arguments(SOURCES "EXCLUDE;GLOBS" "APPEND" ${ARGN})
+function(add_hpx_library_sources name globtype)
+  set(options APPEND)
+  set(one_value_args)
+  set(multi_value_args EXCLUDE GLOBS)
+  cmake_parse_arguments(
+    SOURCES "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN}
+  )
 
   file(${globtype} sources ${SOURCES_GLOBS})
 
-  if(NOT ${SOURCES_APPEND})
-    set(${name}_SOURCES "" CACHE INTERNAL "Sources for lib${name}." FORCE)
+  if(NOT SOURCES_APPEND)
+    set(${name}_SOURCES
+        ""
+        CACHE INTERNAL "Sources for lib${name}." FORCE
+    )
   endif()
 
   foreach(source ${sources})
@@ -31,24 +35,35 @@ macro(add_hpx_library_sources name globtype)
 
     if(add_flag)
       hpx_debug("add_library_sources.${name}"
-                "Adding ${absolute_path} to source list for lib${name}")
-      set(${name}_SOURCES ${${name}_SOURCES} ${absolute_path}
-        CACHE INTERNAL "Sources for lib${name}." FORCE)
+                "Adding ${absolute_path} to source list for lib${name}"
+      )
+      set(${name}_SOURCES
+          ${${name}_SOURCES} ${absolute_path}
+          CACHE INTERNAL "Sources for lib${name}." FORCE
+      )
     endif()
   endforeach()
-endmacro()
+endfunction()
 
-###############################################################################
-macro(add_hpx_library_sources_noglob name)
-  hpx_parse_arguments(SOURCES "EXCLUDE;SOURCES" "APPEND" ${ARGN})
+# ##############################################################################
+function(add_hpx_library_sources_noglob name)
+  set(options APPEND)
+  set(one_value_args)
+  set(multi_value_args EXCLUDE SOURCES)
+  cmake_parse_arguments(
+    SOURCES "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN}
+  )
 
-#  hpx_print_list("DEBUG" "add_hpx_library_sources_noglob.${name}"
-#    "Sources for ${name}" ${SOURCES_SOURCES})
+  # hpx_print_list("DEBUG" "add_hpx_library_sources_noglob.${name}" "Sources for
+  # ${name}" ${SOURCES_SOURCES})
 
   set(sources ${SOURCES_SOURCES})
 
-  if(NOT ${SOURCES_APPEND})
-    set(${name}_SOURCES "" CACHE INTERNAL "Sources for lib${name}." FORCE)
+  if(NOT SOURCES_APPEND)
+    set(${name}_SOURCES
+        ""
+        CACHE INTERNAL "Sources for lib${name}." FORCE
+    )
   endif()
 
   foreach(source ${sources})
@@ -64,10 +79,12 @@ macro(add_hpx_library_sources_noglob name)
 
     if(add_flag)
       hpx_debug("add_library_sources.${name}"
-                "Adding ${absolute_path} to source list for lib${name}")
-      set(${name}_SOURCES ${${name}_SOURCES} ${absolute_path}
-        CACHE INTERNAL "Sources for lib${name}." FORCE)
+                "Adding ${absolute_path} to source list for lib${name}"
+      )
+      set(${name}_SOURCES
+          ${${name}_SOURCES} ${absolute_path}
+          CACHE INTERNAL "Sources for lib${name}." FORCE
+      )
     endif()
   endforeach()
-endmacro()
-
+endfunction()

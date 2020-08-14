@@ -1,61 +1,75 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c) 2011 Bryce Lelbach
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
-#if !defined(HPX_0C9D09E0_725D_4FA6_A879_8226DE97C6B9)
-#define HPX_0C9D09E0_725D_4FA6_A879_8226DE97C6B9
+#pragma once
 
-#include <boost/cstdint.hpp>
-#include <boost/noncopyable.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/condition_variable.hpp>
-#include <boost/lockfree/fifo.hpp>
+#include <hpx/config.hpp>
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/util/io_service_pool.hpp>
-#include <hpx/util/connection_cache.hpp>
+#if defined(HPX_HAVE_NETWORKING)
+#include <hpx/assert.hpp>
+#include <hpx/synchronization/spinlock.hpp>
+#include <hpx/runtime_local/runtime_local.hpp>
 #include <hpx/runtime/naming/address.hpp>
+#include <hpx/runtime/parcelset_fwd.hpp>
+#include <hpx/runtime/parcelset/locality.hpp>
+#include <hpx/util/connection_cache.hpp>
+#include <hpx/io_service/io_service_pool.hpp>
+#include <boost/lockfree/queue.hpp>
+
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include <hpx/config/warnings_prefix.hpp>
 
 namespace hpx { namespace agas
 {
 
-struct HPX_EXPORT big_boot_barrier : boost::noncopyable
+struct notification_header;
+
+struct HPX_EXPORT big_boot_barrier
 {
-  private:
-    parcelset::parcelport& pp;
-    util::connection_cache<parcelset::parcelport_connection, naming::locality>& connection_cache_;
-    util::io_service_pool& io_service_pool_;
+public:
+    HPX_NON_COPYABLE(big_boot_barrier);
 
-    const service_mode service_type;
-    const runtime_mode runtime_type;
-    const naming::address bootstrap_agas;
+private:
+    parcelset::parcelport* pp;
+    parcelset::endpoints_type const& endpoints;
 
-    boost::condition_variable cond;
-    boost::mutex mtx;
+    service_mode const service_type;
+    parcelset::locality const bootstrap_agas;
+
+    std::condition_variable cond;
+    std::mutex mtx;
     std::size_t connected;
 
-    boost::lockfree::fifo<HPX_STD_FUNCTION<void()>* > thunks;
+    boost::lockfree::queue<util::unique_function_nonser<void()>* > thunks;
+
+    std::vector<parcelset::endpoints_type> localities;
 
     void spin();
 
     void notify();
 
-  public:
+public:
     struct scoped_lock
     {
-      private:
+    private:
         big_boot_barrier& bbb;
 
-      public:
-        scoped_lock(
-            big_boot_barrier& bbb_
-            )
+    public:
+        explicit scoped_lock(big_boot_barrier& bbb_)
           : bbb(bbb_)
         {
             bbb.mtx.lock();
@@ -68,34 +82,61 @@ struct HPX_EXPORT big_boot_barrier : boost::noncopyable
     };
 
     big_boot_barrier(
-        parcelset::parcelport& pp_
+        parcelset::parcelport* pp_
+      , parcelset::endpoints_type const& endpoints_
       , util::runtime_configuration const& ini_
-      , runtime_mode runtime_type_
         );
 
+    ~big_boot_barrier()
+    {
+        util::unique_function_nonser<void()>* f;
+        while (thunks.pop(f))
+            delete f;
+    }
+
+    parcelset::locality here() { return bootstrap_agas; }
+    parcelset::endpoints_type const &get_endpoints() { return endpoints; }
+
+    template <typename Action, typename... Args>
     void apply(
-        boost::uint32_t prefix
-      , naming::address const& addr
-      , actions::base_action* act
-        );
+        std::uint32_t source_locality_id
+      , std::uint32_t target_locality_id
+      , parcelset::locality dest
+      , Action act
+      , Args &&... args);
 
-    void wait();
+    template <typename Action, typename... Args>
+    void apply_late(
+        std::uint32_t source_locality_id
+      , std::uint32_t target_locality_id
+      , parcelset::locality const & dest
+      , Action act
+      , Args &&... args);
+
+    void apply_notification(
+        std::uint32_t source_locality_id
+      , std::uint32_t target_locality_id
+      , parcelset::locality const& dest
+      , notification_header&& hdr);
+
+    void wait_bootstrap();
+    void wait_hosted(std::string const& locality_name,
+        naming::address::address_type primary_ns_ptr,
+        naming::address::address_type symbol_ns_ptr);
 
     // no-op on non-bootstrap localities
     void trigger();
 
-    void add_thunk(
-        HPX_STD_FUNCTION<void()>* f
-        )
-    {
-        thunks.enqueue(f);
-    }
+    void add_thunk(util::unique_function_nonser<void()>* f);
+
+    void add_locality_endpoints(std::uint32_t locality_id,
+        parcelset::endpoints_type const& endpoints);
 };
 
 HPX_EXPORT void create_big_boot_barrier(
-    parcelset::parcelport& pp_
+    parcelset::parcelport* pp_
+  , parcelset::endpoints_type const& endpoints_
   , util::runtime_configuration const& ini_
-  , runtime_mode runtime_type_
     );
 
 HPX_EXPORT void destroy_big_boot_barrier();
@@ -106,5 +147,5 @@ HPX_EXPORT big_boot_barrier& get_big_boot_barrier();
 
 #include <hpx/config/warnings_suffix.hpp>
 
-#endif // HPX_0C9D09E0_725D_4FA6_A879_8226DE97C6B9
+#endif
 

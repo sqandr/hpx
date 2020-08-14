@@ -1,15 +1,18 @@
 //  Copyright (c) 2011 Matt Anderson
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_COMPONENTS_RANDOM_ACCESS_JUN_06_2011_1123AM)
-#define HPX_COMPONENTS_RANDOM_ACCESS_JUN_06_2011_1123AM
+#pragma once
 
-#include <hpx/runtime.hpp>
-#include <hpx/runtime/components/client_base.hpp>
+#include <hpx/include/runtime.hpp>
+#include <hpx/include/client.hpp>
 
-#include "stubs/random_mem_access.hpp"
+#include "server/random_mem_access.hpp"
+
+#include <cstddef>
+#include <utility>
 
 namespace hpx { namespace components
 {
@@ -17,75 +20,69 @@ namespace hpx { namespace components
     /// The \a random_mem_access class is the client side representation of a
     /// specific \a server#random_mem_access component
     class random_mem_access
-      : public client_base<random_mem_access, stubs::random_mem_access>
+      : public client_base<random_mem_access, server::random_mem_access>
     {
         typedef
-            client_base<random_mem_access, stubs::random_mem_access>
+            client_base<random_mem_access, server::random_mem_access>
         base_type;
 
     public:
-        random_mem_access()
-        {}
+        random_mem_access() = default;
 
         /// Create a client side representation for the existing
-        /// \a server#random_mem_access instance with the given global id \a gid.
-        random_mem_access(naming::id_type gid)
-          : base_type(gid)
+        /// \a server#random_mem_access instance with the given global \a id.
+        random_mem_access(id_type id)
+          : base_type(std::move(id))
         {}
 
-        ~random_mem_access()
-        {}
+        ~random_mem_access() = default;
 
         ///////////////////////////////////////////////////////////////////////
         // exposed functionality of this component
 
         /// Initialize the random_mem_access value
-        void init(int i)
+        void init(std::size_t i)
         {
-            BOOST_ASSERT(gid_);
-            this->base_type::init(gid_,i);
+            typedef server::random_mem_access::init_action init_action;
+            hpx::apply<init_action>(this->get_id(), i);
         }
 
         /// Add the given number to the random_mem_access
-        void add ()
+        void add()
         {
-            BOOST_ASSERT(gid_);
-            this->base_type::add(gid_);
+            add_async().get();
         }
 
-        hpx::lcos::future<void> add_async ()
+        hpx::lcos::future<void> add_async()
         {
-            BOOST_ASSERT(gid_);
-            return(this->base_type::add_async(gid_));
+            typedef server::random_mem_access::add_action action_type;
+            return hpx::async<action_type>(this->get_id());
         }
 
         /// Print the current value of the random_mem_access
         void print()
         {
-            BOOST_ASSERT(gid_);
-            this->base_type::print(gid_);
+            print_async().get();
         }
         /// Asynchronously query the current value of the random_mem_access
         hpx::lcos::future<void> print_async ()
         {
-            BOOST_ASSERT(gid_);
-            return(this->base_type::print_async(gid_));
+            typedef server::random_mem_access::print_action action_type;
+            return hpx::async<action_type>(this->get_id());
         }
 
         /// Query the current value of the random_mem_access
-        int query()
+        std::size_t query()
         {
-            BOOST_ASSERT(gid_);
-            return this->base_type::query(gid_);
+            return query_async().get();
         }
 
         /// Asynchronously query the current value of the random_mem_access
-        lcos::future<int> query_async()
+        lcos::future<std::size_t> query_async()
         {
-            return this->base_type::query_async(gid_);
+            typedef server::random_mem_access::query_action action_type;
+            return hpx::async<action_type>(this->get_id());
         }
     };
-
 }}
 
-#endif

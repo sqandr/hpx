@@ -1,15 +1,19 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 #include <hpx/hpx_init.hpp>
 #include <hpx/include/actions.hpp>
 
+#include <iostream>
+#include <string>
+
 #include "interpolate1d/interpolate1d.hpp"
 
-using boost::program_options::variables_map;
-using boost::program_options::options_description;
+using hpx::program_options::variables_map;
+using hpx::program_options::options_description;
 
 double const pi = 4*std::atan(1.);
 
@@ -22,7 +26,7 @@ eval(char const* expr, interpolate1d::interpolate1d& sine, double value)
               << std::endl;
 }
 
-int hpx_main(variables_map& vm)
+int hpx_main()
 {
     std::string datafilename("sine.h5");
     int num_localities = 7;
@@ -50,11 +54,6 @@ int hpx_main(variables_map& vm)
 ///////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[])
 {
-    // Configure application-specific options
-    options_description desc_commandline(
-        "Usage: " HPX_APPLICATION_STRING " [options]");
-
-    // Initialize and run HPX
-    return hpx::init(desc_commandline, argc, argv);
+    return hpx::init(argc, argv);       // Initialize and run HPX
 }
 

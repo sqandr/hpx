@@ -1,16 +1,13 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/actions/continuation.hpp>
-#include <hpx/runtime/components/component_factory.hpp>
+#include <hpx/hpx.hpp>
 
-#include <hpx/util/portable_binary_iarchive.hpp>
-#include <hpx/util/portable_binary_oarchive.hpp>
-
-#include <boost/assert.hpp>
+#include <cstddef>
+#include <string>
 
 #include "partition.hpp"
 #include "../read_values.hpp"
@@ -18,13 +15,17 @@
 ///////////////////////////////////////////////////////////////////////////////
 namespace interpolate1d { namespace server
 {
+    partition::mutex_type partition::mtx_{};
+
     partition::partition()
-      : min_value_(0), max_value_(0), delta_(0)
+      : dim_(), min_value_(0), max_value_(0), delta_(0)
     {}
 
-    void partition::init(std::string datafilename, dimension const& dim,
+    void partition::init(std::string const& datafilename, dimension const& dim,
         std::size_t num_nodes)
     {
+        std::lock_guard<mutex_type> l(mtx_);
+
         // store all parameters
         dim_ = dim;
 
@@ -48,7 +49,7 @@ namespace interpolate1d { namespace server
     }
 
     // do the actual interpolation
-    double partition::interpolate(double value)
+    double partition::interpolate(double value) const
     {
         if (value < min_value_ || value > max_value_) {
             HPX_THROW_EXCEPTION(hpx::bad_parameter, "partition::interpolate",
@@ -57,7 +58,7 @@ namespace interpolate1d { namespace server
         }
 
         std::size_t index = static_cast<std::size_t>((value - min_value_) / delta_);
-        BOOST_ASSERT(0 <= index && index < dim_.count_);
+        HPX_ASSERT(0 <= index && index < dim_.count_);
 
         return values_[index];
     }
@@ -68,11 +69,11 @@ typedef interpolate1d::server::partition partition_type;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Serialization support for the actions
-HPX_REGISTER_ACTION_EX(partition_type::init_action,
+HPX_REGISTER_ACTION(partition_type::init_action,
     partition_init_action);
-HPX_REGISTER_ACTION_EX(partition_type::interpolate_action,
+HPX_REGISTER_ACTION(partition_type::interpolate_action,
     partition_interpolate_action);
 
-HPX_REGISTER_MINIMAL_COMPONENT_FACTORY(
-    hpx::components::simple_component<partition_type>,
+HPX_REGISTER_COMPONENT(
+    hpx::components::component<partition_type>,
     interpolate1d_partition_type);

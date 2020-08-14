@@ -1,27 +1,24 @@
 //  Copyright (c) 2011 Matt Anderson
 //  Copyright (c) 2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_COMPONENTS_SERVER_RANDOM_JUN_06_2011_1154AM)
-#define HPX_COMPONENTS_SERVER_RANDOM_JUN_06_2011_1154AM
+#pragma once
 
-#include <sstream>
+#include <hpx/hpx.hpp>
+
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
-
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/applier/applier.hpp>
-#include <hpx/runtime/threads/thread_data.hpp>
-#include <hpx/runtime/actions/component_action.hpp>
-#include <hpx/runtime/components/component_type.hpp>
-#include <hpx/runtime/components/server/simple_component_base.hpp>
-#include <boost/thread/locks.hpp>
+#include <sstream>
 
 namespace hpx { namespace components { namespace server
 {
     ///////////////////////////////////////////////////////////////////////////
-    /// \class random_mem_access random_mem_access.hpp hpx/components/random_mem_access.hpp
+    /// \class random_mem_access random_mem_access.hpp
+    /// hpx/components/random_mem_access.hpp
     ///
     /// The random_mem_access is a small example components demonstrating
     /// the main principles of writing your own components. It exposes 4
@@ -35,36 +32,21 @@ namespace hpx { namespace components { namespace server
     /// from.
     ///
     class random_mem_access
-      : public simple_component_base<random_mem_access>
+      : public hpx::components::locking_hook<
+            hpx::components::component_base<random_mem_access> >
     {
     public:
-        // parcel action code: the action to be performed on the destination
-        // object (the accumulator)
-        enum actions
-        {
-            random_mem_access_init = 0,
-            random_mem_access_add = 1,
-            random_mem_access_query_value = 2,
-            random_mem_access_print = 3
-        };
-
         // constructor: initialize random_mem_access value
         random_mem_access()
-          : arg_(0), arg_init_(0), prefix_(0)
-        {
-            applier::applier* appl = applier::get_applier_ptr();
-            if (appl)
-                prefix_ = appl->get_locality_id();
-        }
+          : arg_(0), arg_init_(0), prefix_(hpx::get_locality_id())
+        {}
 
         ///////////////////////////////////////////////////////////////////////
         // exposed functionality of this component
 
         /// Initialize the accumulator
-        void init(int i)
+        void init(std::size_t i)
         {
-            hpx::lcos::local::mutex::scoped_lock l(mtx_);
-
             std::ostringstream oss;
             oss << "[L" << prefix_ << "/" << this << "]"
                 << " Initializing count to " << i << "\n";
@@ -77,8 +59,6 @@ namespace hpx { namespace components { namespace server
         /// Add the given number to the accumulator
         void add()
         {
-            hpx::lcos::local::mutex::scoped_lock l(mtx_);
-
             std::ostringstream oss;
             oss << "[L" << prefix_ << "/" << this << "]"
                 << " Incrementing count from " << arg_
@@ -89,10 +69,8 @@ namespace hpx { namespace components { namespace server
         }
 
         /// Return the current value to the caller
-        int query()
+        std::size_t query()
         {
-            hpx::lcos::local::mutex::scoped_lock l(mtx_);
-
             std::ostringstream oss;
             oss << "[L" << prefix_ << "/" << this << "]"
                 << " Querying count, current value is " << arg_ << "\n";
@@ -104,8 +82,6 @@ namespace hpx { namespace components { namespace server
         /// Print the current value of the accumulator
         void print()
         {
-            hpx::lcos::local::mutex::scoped_lock l(mtx_);
-
             std::ostringstream oss;
             oss << "[L" << prefix_ << "/" << this << "]"
                 << " Initial count was " << arg_init_
@@ -117,47 +93,30 @@ namespace hpx { namespace components { namespace server
         // Each of the exposed functions needs to be encapsulated into an action
         // type, allowing to generate all required boilerplate code for threads,
         // serialization, etc.
-        typedef hpx::actions::action1<
-            random_mem_access, random_mem_access_init, int,
-            &random_mem_access::init
-        > init_action;
-
-        typedef hpx::actions::action0<
-            random_mem_access, random_mem_access_add,
-            &random_mem_access::add
-        > add_action;
-
-        typedef hpx::actions::result_action0<
-            random_mem_access, int, random_mem_access_query_value,
-            &random_mem_access::query
-        > query_action;
-
-        typedef hpx::actions::action0<
-            random_mem_access, random_mem_access_print,
-            &random_mem_access::print
-        > print_action;
+        HPX_DEFINE_COMPONENT_ACTION(random_mem_access, init);
+        HPX_DEFINE_COMPONENT_ACTION(random_mem_access, add);
+        HPX_DEFINE_COMPONENT_ACTION(random_mem_access, query);
+        HPX_DEFINE_COMPONENT_ACTION(random_mem_access, print);
 
     private:
-        int arg_;
-        int arg_init_;
-        boost::uint32_t prefix_;
-        hpx::lcos::local::mutex mtx_;
+        std::size_t arg_;
+        std::size_t arg_init_;
+        std::uint32_t prefix_;
     };
 
 }}}
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::components::server::random_mem_access::init_action,
     random_mem_access_init_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::components::server::random_mem_access::add_action,
     random_mem_access_add_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::components::server::random_mem_access::query_action,
     random_mem_access_query_action);
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::components::server::random_mem_access::print_action,
     random_mem_access_print_action);
 
-#endif
 

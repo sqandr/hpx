@@ -1,369 +1,297 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
-//  Copyright (c) 2007      Richard D Guidry Jr
-//  Copyright (c) 2011      Bryce Lelbach & Katelyn Kufahl
+//  Copyright (c) 2007-2017 Hartmut Kaiser
+//  Copyright (c) 2013-2014 Thomas Heller
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <string>
+// This is needed to make everything work with the Intel MPI library header
+#include <hpx/config.hpp>
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/exception_list.hpp>
-#include <hpx/runtime/naming/locality.hpp>
-#include <hpx/runtime/threads/thread_helpers.hpp>
+#if defined(HPX_HAVE_NETWORKING)
+#include <hpx/state.hpp>
+#include <hpx/runtime_fwd.hpp>
+#include <hpx/async_distributed/applier/applier.hpp>
 #include <hpx/runtime/parcelset/parcelport.hpp>
-#include <hpx/util/io_service_pool.hpp>
-#include <hpx/util/stringstream.hpp>
-
-#include <boost/version.hpp>
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/buffer.hpp>
-#include <boost/asio/read.hpp>
-#include <boost/asio/write.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/bind.hpp>
-#if defined(HPX_DEBUG)
-#include <boost/foreach.hpp>
+#include <hpx/modules/threading.hpp>
+#include <hpx/util/get_entry_as.hpp>
+#include <hpx/runtime_configuration/runtime_configuration.hpp>
+#include <hpx/io_service/io_service_pool.hpp>
+#include <hpx/modules/errors.hpp>
+#if defined(HPX_HAVE_APEX)
+#include <hpx/threading_base/external_timer.hpp>
 #endif
+#include <hpx/assert.hpp>
 
-///////////////////////////////////////////////////////////////////////////////
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <string>
+#include <utility>
+
 namespace hpx { namespace parcelset
 {
     ///////////////////////////////////////////////////////////////////////////
-    namespace detail
+    parcelport::parcelport(util::runtime_configuration const& ini,
+            locality const & here, std::string const& type)
+      : applier_(nullptr),
+        num_parcel_destinations_(0),
+        here_(here),
+        max_inbound_message_size_(ini.get_max_inbound_message_size()),
+        max_outbound_message_size_(ini.get_max_outbound_message_size()),
+        allow_array_optimizations_(true),
+        allow_zero_copy_optimizations_(true),
+        async_serialization_(false),
+        priority_(hpx::util::get_entry_as<int>(ini,
+            "hpx.parcel." + type + ".priority", 0)),
+        type_(type)
     {
-        struct call_for_each
+        std::string key("hpx.parcel.");
+        key += type;
+
+        if (hpx::util::get_entry_as<int>(
+                ini, key + ".array_optimization", 1) == 0)
         {
-            typedef void result_type;
-
-            typedef std::vector<parcelport::write_handler_type> data_type;
-            data_type fv_;
-
-            call_for_each(data_type const& fv)
-              : fv_(fv)
-            {}
-
-            result_type operator()(
-                boost::system::error_code const& e,
-                std::size_t bytes_written) const
+            allow_array_optimizations_ = false;
+            allow_zero_copy_optimizations_ = false;
+        }
+        else
+        {
+            if (hpx::util::get_entry_as<int>(
+                    ini, key + ".zero_copy_optimization", 1) == 0)
             {
-                BOOST_FOREACH(parcelport::write_handler_type f, fv_)
-                {
-                    f(e, bytes_written);
-                }
+                allow_zero_copy_optimizations_ = false;
             }
-        };
-    }
-
-    ///////////////////////////////////////////////////////////////////////////
-    parcelport::parcelport(util::io_service_pool& io_service_pool,
-            naming::locality h
-          , std::size_t max_connections
-          , std::size_t max_connections_per_loc)
-      : io_service_pool_(io_service_pool),
-        acceptor_(NULL),
-        parcels_(This()),
-        connection_cache_(max_connections, max_connections_per_loc),
-        here_(h)
-    {}
-
-    parcelport::~parcelport()
-    {
-        // make sure all existing connections get destroyed first
-        connection_cache_.clear();
-        if (NULL != acceptor_) {
-            boost::system::error_code ec;
-            acceptor_->close(ec);
-            delete acceptor_;
         }
-    }
 
-    bool parcelport::run(bool blocking)
-    {
-        io_service_pool_.run(false);    // start pool
-
-        using boost::asio::ip::tcp;
-        if (NULL == acceptor_)
-            acceptor_ = new boost::asio::ip::tcp::acceptor(io_service_pool_.get_io_service());
-
-        // initialize network
-        std::size_t tried = 0;
-        exception_list errors;
-        naming::locality::iterator_type end = here_.accept_end();
-        for (naming::locality::iterator_type it =
-                here_.accept_begin(io_service_pool_.get_io_service());
-             it != end; ++it, ++tried)
+        if (hpx::util::get_entry_as<int>(
+                ini, key + ".async_serialization", 0) != 0)
         {
-            try {
-                server::parcelport_connection_ptr conn(
-                    new server::parcelport_connection(
-                        io_service_pool_.get_io_service(), parcels_, timer_));
-
-                tcp::endpoint ep = *it;
-                acceptor_->open(ep.protocol());
-                acceptor_->set_option(tcp::acceptor::reuse_address(true));
-                acceptor_->bind(ep);
-                acceptor_->listen();
-                acceptor_->async_accept(conn->socket(),
-                    boost::bind(&parcelport::handle_accept, this,
-                        boost::asio::placeholders::error, conn));
-            }
-            catch (boost::system::system_error const& e) {
-                errors.add(e);   // store all errors
-                continue;
-            }
-        }
-
-        if (errors.get_error_count() == tried) {
-            // all attempts failed
-            HPX_THROW_EXCEPTION(network_error,
-                "parcelport::parcelport", errors.get_message());
-        }
-
-        return io_service_pool_.run(blocking);
-    }
-
-    void parcelport::stop(bool blocking)
-    {
-        // make sure no more work is pending, wait for service pool to get empty
-        io_service_pool_.stop();
-        if (blocking) {
-            io_service_pool_.join();
-
-            // now it's safe to take everything down
-            connection_cache_.clear();
-
-            if (NULL != acceptor_)
-            {
-                boost::system::error_code ec;
-                acceptor_->close(ec);
-                delete acceptor_;
-                acceptor_ = NULL;
-            }
-
-            io_service_pool_.clear();
-        }
-    }
-
-    /// accepted new incoming connection
-    void parcelport::handle_accept(boost::system::error_code const& e,
-        server::parcelport_connection_ptr conn)
-    {
-        if (!e) {
-            // handle this incoming parcel
-            server::parcelport_connection_ptr c(conn);    // hold on to conn
-
-            // create new connection waiting for next incoming parcel
-            conn.reset(new server::parcelport_connection(
-                io_service_pool_.get_io_service(), parcels_, timer_));
-
-            acceptor_->async_accept(conn->socket(),
-                boost::bind(&parcelport::handle_accept, this,
-                    boost::asio::placeholders::error, conn));
-
-            // now accept the incoming connection by starting to read from the
-            // socket
-            c->async_read(
-                boost::bind(&parcelport::handle_read_completion, this,
-                    boost::asio::placeholders::error, c));
-        }
-    }
-
-    /// Handle completion of a read operation.
-    void parcelport::handle_read_completion(boost::system::error_code const& e,
-        server::parcelport_connection_ptr)
-    {
-        if (e && e != boost::asio::error::operation_aborted
-              && e != boost::asio::error::eof)
-        {
-            LPT_(error)
-                << "handle read operation completion: error: "
-                << e.message();
+            async_serialization_ = true;
         }
     }
 
     ///////////////////////////////////////////////////////////////////////////
-    void parcelport::put_parcel(parcel const& p, write_handler_type f)
+    // Update performance counter data
+    void parcelport::add_received_data(
+        performance_counters::parcels::data_point const& data)
     {
-        typedef pending_parcels_map::iterator iterator;
-        naming::locality locality_id = p.get_destination_locality();
+        parcels_received_.add_data(data);
+    }
 
-        parcelport_connection_ptr client_connection;
+    void parcelport::add_sent_data(
+        performance_counters::parcels::data_point const& data)
+    {
+        parcels_sent_.add_data(data);
+    }
 
-        // enqueue the incoming parcel ...
+#if defined(HPX_HAVE_PARCELPORT_ACTION_COUNTERS)
+    void parcelport::add_received_data(char const* action,
+        performance_counters::parcels::data_point const& data)
+    {
+        action_parcels_received_.add_data(action, data);
+    }
+
+    void parcelport::add_sent_data(char const* action,
+        performance_counters::parcels::data_point const& data)
+    {
+        action_parcels_sent_.add_data(action, data);
+    }
+#endif
+
+    ///////////////////////////////////////////////////////////////////////////
+    // number of parcels sent
+    std::int64_t parcelport::get_parcel_send_count(bool reset)
+    {
+        return parcels_sent_.num_parcels(reset);
+    }
+
+    // number of messages sent
+    std::int64_t parcelport::get_message_send_count(bool reset)
+    {
+        return parcels_sent_.num_messages(reset);
+    }
+
+    // number of parcels received
+    std::int64_t parcelport::get_parcel_receive_count(bool reset)
+    {
+        return parcels_received_.num_parcels(reset);
+    }
+
+    // number of messages received
+    std::int64_t parcelport::get_message_receive_count(bool reset)
+    {
+        return parcels_received_.num_messages(reset);
+    }
+
+    // the total time it took for all sends, from async_write to the
+    // completion handler (nanoseconds)
+    std::int64_t parcelport::get_sending_time(bool reset)
+    {
+        return parcels_sent_.total_time(reset);
+    }
+
+    // the total time it took for all receives, from async_read to the
+    // completion handler (nanoseconds)
+    std::int64_t parcelport::get_receiving_time(bool reset)
+    {
+        return parcels_received_.total_time(reset);
+    }
+
+    // the total time it took for all sender-side serialization operations
+    // (nanoseconds)
+    std::int64_t parcelport::get_sending_serialization_time(bool reset)
+    {
+        return parcels_sent_.total_serialization_time(reset);
+    }
+
+    // the total time it took for all receiver-side serialization
+    // operations (nanoseconds)
+    std::int64_t parcelport::get_receiving_serialization_time(bool reset)
+    {
+        return parcels_received_.total_serialization_time(reset);
+    }
+
+    // total data sent (bytes)
+    std::int64_t parcelport::get_data_sent(bool reset)
+    {
+        return parcels_sent_.total_bytes(reset);
+    }
+
+    // total data (uncompressed) sent (bytes)
+    std::int64_t parcelport::get_raw_data_sent(bool reset)
+    {
+        return parcels_sent_.total_raw_bytes(reset);
+    }
+
+    // total data received (bytes)
+    std::int64_t parcelport::get_data_received(bool reset)
+    {
+        return parcels_received_.total_bytes(reset);
+    }
+
+    // total data (uncompressed) received (bytes)
+    std::int64_t parcelport::get_raw_data_received(bool reset)
+    {
+        return parcels_received_.total_raw_bytes(reset);
+    }
+
+    std::int64_t parcelport::get_buffer_allocate_time_sent(bool reset)
+    {
+        return parcels_sent_.total_buffer_allocate_time(reset);
+    }
+
+    std::int64_t parcelport::get_buffer_allocate_time_received(bool reset)
+    {
+        return parcels_received_.total_buffer_allocate_time(reset);
+    }
+
+    std::int64_t parcelport::get_pending_parcels_count(bool /*reset*/)
+    {
+        std::lock_guard<lcos::local::spinlock> l(mtx_);
+        std::int64_t count = 0;
+        for (auto && p : pending_parcels_)
         {
-            util::spinlock::scoped_lock l(mtx_);
-            pending_parcels_[locality_id].first.push_back(p);
-            pending_parcels_[locality_id].second.push_back(f);
+            count += hpx::util::get<0>(p.second).size();
+            HPX_ASSERT(
+                hpx::util::get<0>(p.second).size() ==
+                hpx::util::get<1>(p.second).size());
         }
+        return count;
+    }
 
-        // Get a connection or reserve space for a new connection.
-        if (!connection_cache_.get_or_reserve(locality_id, client_connection))
+    ///////////////////////////////////////////////////////////////////////////
+#if defined(HPX_HAVE_PARCELPORT_ACTION_COUNTERS)
+    // same as above, just separated data for each action
+    // number of parcels sent
+    std::int64_t parcelport::get_action_parcel_send_count(
+        std::string const& action, bool reset)
+    {
+        if (action.empty())
+            return parcels_sent_.num_parcels(reset);
+        return action_parcels_sent_.num_parcels(action, reset);
+    }
+
+    // number of parcels received
+    std::int64_t parcelport::get_action_parcel_receive_count(
+        std::string const& action, bool reset)
+    {
+        if (action.empty())
+            return parcels_received_.num_parcels(reset);
+        return action_parcels_received_.num_parcels(action, reset);
+    }
+
+    // the total time it took for all sender-side serialization operations
+    // (nanoseconds)
+    std::int64_t parcelport::get_action_sending_serialization_time(
+        std::string const& action, bool reset)
+    {
+        if (action.empty())
+            return parcels_sent_.total_serialization_time(reset);
+        return action_parcels_sent_.total_serialization_time(action, reset);
+    }
+
+    // the total time it took for all receiver-side serialization
+    // operations (nanoseconds)
+    std::int64_t parcelport::get_action_receiving_serialization_time(
+        std::string const& action, bool reset)
+    {
+        if (action.empty())
+            return parcels_received_.total_serialization_time(reset);
+        return action_parcels_received_.total_serialization_time(action, reset);
+    }
+
+    // total data sent (bytes)
+    std::int64_t parcelport::get_action_data_sent(
+        std::string const& action, bool reset)
+    {
+        if (action.empty())
+            return parcels_sent_.total_bytes(reset);
+        return action_parcels_sent_.total_bytes(action, reset);
+    }
+
+    // total data received (bytes)
+    std::int64_t parcelport::get_action_data_received(
+        std::string const& action, bool reset)
+    {
+        if (action.empty())
+            return parcels_received_.total_bytes(reset);
+        return action_parcels_received_.total_bytes(action, reset);
+    }
+#endif
+
+    ///////////////////////////////////////////////////////////////////////////
+    std::int64_t get_max_inbound_size(parcelport& pp)
+    {
+        return pp.get_max_inbound_message_size();
+    }
+
+    ///////////////////////////////////////////////////////////////////////////
+    // the code below is needed to bootstrap the parcel layer
+    void parcelport::early_pending_parcel_handler(
+        boost::system::error_code const& ec, parcel const & p)
+    {
+        if (ec) {
+            // all errors during early parcel handling are fatal
+            std::exception_ptr exception =
+                HPX_GET_EXCEPTION(ec,
+                    "early_pending_parcel_handler",
+                    "error while handling early parcel: " +
+                        ec.message() + "(" +
+                        std::to_string(ec.value()) +
+                        ")" + parcelset::dump_parcel(p));
+
+            hpx::report_error(exception);
             return;
+        }
 
-        // Check if we need to create the new connection.
-        if (!client_connection)
-        {
-            client_connection.reset(new parcelport_connection(
-                io_service_pool_.get_io_service(), locality_id,
-                connection_cache_, timer_, parcels_sent_));
-
-            // Connect to the target locality, retry if needed.
-            boost::system::error_code error = boost::asio::error::try_again;
-            for (int i = 0; i < HPX_MAX_NETWORK_RETRIES; ++i)
-            {
-                try {
-                    naming::locality::iterator_type end = locality_id.connect_end();
-                    for (naming::locality::iterator_type it =
-                            locality_id.connect_begin(io_service_pool_.get_io_service());
-                         it != end; ++it)
-                    {
-                        client_connection->socket().close();
-                        client_connection->socket().connect(*it, error);
-                        if (!error)
-                            break;
-                    }
-                    if (!error)
-                        break;
-
-                    // we wait for a really short amount of time
-                    // TODO: Should this be an hpx::threads::suspend?
-                    boost::this_thread::sleep(boost::get_system_time() +
-                        boost::posix_time::milliseconds(HPX_NETWORK_RETRIES_SLEEP));
-                }
-                catch (boost::system::error_code const& e) {
-                    HPX_THROW_EXCEPTION(network_error,
-                        "parcelport::send_parcel", e.message());
-                }
-            }
-
-            if (error) {
-                client_connection->socket().close();
-
-                hpx::util::osstream strm;
-                strm << error.message() << " (while trying to connect to: "
-                     << locality_id << ")";
-                HPX_THROW_EXCEPTION(network_error,
-                    "parcelport::send_parcel",
-                    hpx::util::osstream_get_string(strm));
-            }
-#if defined(HPX_DEBUG)
-            else {
-                std::string connection_addr =
-                    client_connection->socket().remote_endpoint().address().to_string();
-                boost::uint16_t connection_port =
-                    client_connection->socket().remote_endpoint().port();
-                BOOST_ASSERT(locality_id.get_address() == connection_addr);
-                BOOST_ASSERT(locality_id.get_port() == connection_port);
-            }
+#if defined(HPX_HAVE_APEX) && defined(HPX_HAVE_PARCEL_PROFILING)
+        // tell APEX about the sent parcel
+        util::external_timer::send(p.parcel_id().get_lsb(), p.size(),
+            p.destination_locality_id());
 #endif
-        }
-#if defined(HPX_DEBUG)
-        else {
-            //LPT_(info) << "parcelport: reusing existing connection to: "
-            //           << addr.locality_;
-            BOOST_ASSERT(locality_id == client_connection->destination());
-
-            std::string connection_addr = client_connection->socket().remote_endpoint().address().to_string();
-            boost::uint16_t connection_port = client_connection->socket().remote_endpoint().port();
-            BOOST_ASSERT(locality_id.get_address() == connection_addr);
-            BOOST_ASSERT(locality_id.get_port() == connection_port);
-        }
-#endif
-
-        std::vector<parcel> parcels;
-        std::vector<write_handler_type> handlers;
-
-        {
-            util::spinlock::scoped_lock l(mtx_);
-            iterator it = pending_parcels_.find(locality_id);
-
-            if (it != pending_parcels_.end())
-            {
-                BOOST_ASSERT(it->first == locality_id);
-                std::swap(parcels, it->second.first);
-                std::swap(handlers, it->second.second);
-            }
-        }
-
-        // If the parcels didn't get sent by another connection ...
-        if (!parcels.empty() && !handlers.empty())
-        {
-            send_pending_parcels(client_connection, parcels, handlers);
-        }
-        else
-        {
-            // ... or re-add the stuff to the cache
-            BOOST_ASSERT(locality_id == client_connection->destination());
-            connection_cache_.reclaim(locality_id, client_connection);
-        }
     }
 
-    void parcelport::send_pending_parcels_trampoline(
-        naming::locality const& locality_id)
-    {
-        parcelport_connection_ptr client_connection(
-            connection_cache_.get(locality_id));
-
-        // If another thread was faster ... try again
-        if (!client_connection)
-            return;
-
-        std::vector<parcel> parcels;
-        std::vector<write_handler_type> handlers;
-
-        typedef pending_parcels_map::iterator iterator;
-
-        util::spinlock::scoped_lock l(mtx_);
-        iterator it = pending_parcels_.find(locality_id);
-
-        if (it != pending_parcels_.end())
-        {
-            std::swap(parcels, it->second.first);
-            std::swap(handlers, it->second.second);
-        }
-
-        if (!parcels.empty() && !handlers.empty())
-        {
-            // create a new thread which sends parcels that might still be pending
-            hpx::applier::register_thread_nullary(
-                HPX_STD_BIND(&parcelport::send_pending_parcels, this,
-                    client_connection, boost::move(parcels),
-                    boost::move(handlers)), "send_pending_parcels");
-        }
-        else
-        {
-            BOOST_ASSERT(locality_id == client_connection->destination());
-            connection_cache_.reclaim(locality_id, client_connection);
-        }
-    }
-
-    void parcelport::send_pending_parcels(
-        parcelport_connection_ptr client_connection,
-        std::vector<parcel> const & parcels,
-        std::vector<write_handler_type> const & handlers)
-    {
-#if defined(HPX_DEBUG)
-        // verify the connection points to the right destination
-        BOOST_FOREACH(parcel const& p, parcels)
-        {
-            naming::locality const parcel_locality_id = p.get_destination_locality();
-            BOOST_ASSERT(parcel_locality_id == client_connection->destination());
-            BOOST_ASSERT(parcel_locality_id.get_address() ==
-                client_connection->socket().remote_endpoint().address().to_string());
-            BOOST_ASSERT(parcel_locality_id.get_port() ==
-                client_connection->socket().remote_endpoint().port());
-        }
-#endif
-        // store parcels in connection
-        // The parcel gets serialized inside set_parcel, no
-        // need to keep the original parcel alive after this call returned.
-        client_connection->set_parcel(parcels);
-
-        // ... start an asynchronous write operation now.
-        client_connection->async_write(
-            detail::call_for_each(handlers),
-            boost::bind(&parcelport::send_pending_parcels_trampoline, this, ::_1)
-        );
-    }
 }}
+
+#endif

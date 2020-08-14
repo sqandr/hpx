@@ -1,19 +1,21 @@
 
 //  Copyright (c) 2012 Thomas Heller
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#ifndef JACOBI_SERVER_STENCIL_ITERATOR_HPP
-#define JACOBI_SERVER_STENCIL_ITERATOR_HPP
+#pragma once
 
 #include "../row.hpp"
 #include "../stencil_iterator.hpp"
 
+#include <hpx/include/actions.hpp>
 #include <hpx/include/components.hpp>
-#include <hpx/include/iostreams.hpp>
+#include <hpx/iostream.hpp>
 #include <hpx/include/lcos.hpp>
 
+#include <cstddef>
 #include <vector>
 
 namespace jacobi
@@ -23,25 +25,12 @@ namespace jacobi
     namespace server
     {
         struct HPX_COMPONENT_EXPORT stencil_iterator
-            : hpx::components::managed_component_base<
-                stencil_iterator
-              , hpx::components::detail::this_type
-              , hpx::traits::construct_with_back_ptr
-            >
+            : hpx::components::component_base<stencil_iterator>
         {
-            typedef 
-                hpx::components::managed_component_base<
-                    stencil_iterator
-                  , hpx::components::detail::this_type
-                  , hpx::traits::construct_with_back_ptr
-                >
+            typedef
+                hpx::components::component_base<stencil_iterator>
                 base_type;
-            typedef hpx::components::managed_component<stencil_iterator> component_type;
-
-            stencil_iterator(component_type * back_ptr)
-                : base_type(back_ptr)
-            {
-            }
+            typedef hpx::components::component<stencil_iterator> component_type;
 
             void init(
                 jacobi::row const & r
@@ -54,14 +43,10 @@ namespace jacobi
                 y = y_;
                 rows[0] = r;
                 jacobi::row tmp;
-                hpx::components::component_type
-                    type = hpx::components::get_component_type<
-                        server::row
-                    >();
-                tmp.id = hpx::async<hpx::components::server::runtime_support::create_component_action>(
+                typedef hpx::components::server::
+                    create_component_action<server::row> create_action;
+                tmp.id = hpx::async<create_action>(
                     hpx::naming::get_locality_from_id(r.id)
-                  , type
-                  , 1
                   ).get();
                 tmp.init(nx_).get();
                 rows[1] = tmp;
@@ -78,13 +63,15 @@ namespace jacobi
               , jacobi::stencil_iterator const & b
             )
             {
-                top = t;
-                bottom = b;
+                top_future[src]    = t.get(src);
+                top_future[dst]    = t.get(dst);
+                bottom_future[src] = b.get(src);
+                bottom_future[dst] = b.get(dst);
             }
 
             void step();
-            
-            row_range get_range(std::size_t begin, std::size_t end);
+
+            jacobi::row get(std::size_t idx);
 
             void update(
                 hpx::lcos::future<row_range> dst
@@ -94,9 +81,10 @@ namespace jacobi
             );
 
             HPX_DEFINE_COMPONENT_ACTION(stencil_iterator, init, init_action);
-            HPX_DEFINE_COMPONENT_ACTION(stencil_iterator, setup_boundary, setup_boundary_action);
+            HPX_DEFINE_COMPONENT_ACTION(stencil_iterator,
+                setup_boundary, setup_boundary_action);
             HPX_DEFINE_COMPONENT_ACTION(stencil_iterator, step, step_action);
-            HPX_DEFINE_COMPONENT_ACTION(stencil_iterator, get_range, get_range_action);
+            HPX_DEFINE_COMPONENT_ACTION(stencil_iterator, get, get_action);
 
             std::size_t y;
             std::size_t ny;
@@ -104,33 +92,31 @@ namespace jacobi
             std::size_t line_block;
             std::size_t src;
             std::size_t dst;
-            jacobi::stencil_iterator top;
+            hpx::lcos::shared_future<jacobi::row> top_future[2];
             jacobi::row rows[2];
-            jacobi::stencil_iterator bottom;
-
+            hpx::lcos::shared_future<jacobi::row> bottom_future[2];
 
         };
     }
 }
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     jacobi::server::stencil_iterator::init_action
   , jacobi_server_stencil_iterator_init_action
 )
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     jacobi::server::stencil_iterator::setup_boundary_action
   , jacobi_server_stencil_iterator_setup_boundary_action
 )
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     jacobi::server::stencil_iterator::step_action
   , jacobi_server_stencil_iterator_step_action
 )
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
-    jacobi::server::stencil_iterator::get_range_action
-  , jacobi_server_stencil_iterator_get_range_action
+HPX_REGISTER_ACTION_DECLARATION(
+    jacobi::server::stencil_iterator::get_action
+  , jacobi_server_stencil_iterator_get_action
 )
 
-#endif

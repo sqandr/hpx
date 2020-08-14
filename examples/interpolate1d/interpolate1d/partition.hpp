@@ -1,76 +1,80 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_PARTITION_AUG_04_2011_0251PM)
-#define HPX_PARTITION_AUG_04_2011_0251PM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/lcos/future.hpp>
-#include <hpx/runtime/components/client_base.hpp>
+#include <hpx/hpx.hpp>
+#include <hpx/include/client.hpp>
 
-#include "stubs/partition.hpp"
+#include <cstddef>
+#include <string>
+#include <utility>
+
+#include "server/partition.hpp"
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace interpolate1d
 {
     class partition
-      : public hpx::components::client_base<
-            partition, interpolate1d::stubs::partition>
+      : public hpx::components::client_base<partition, server::partition>
     {
     private:
-        typedef hpx::components::client_base<
-            partition, interpolate1d::stubs::partition> base_type;
+        typedef hpx::components::client_base<partition, server::partition>
+            base_type;
 
     public:
         // create a new partition instance and initialize it synchronously
-        partition(std::string datafilename, dimension const& dim,
+        partition(std::string const& datafilename, dimension const& dim,
                 std::size_t num_nodes)
-          : base_type(interpolate1d::stubs::partition::create_sync(hpx::find_here()))
+          : base_type(hpx::new_<server::partition>(hpx::find_here()))
         {
             init(datafilename, dim, num_nodes);
         }
-        partition(hpx::naming::id_type gid, std::string datafilename,
+
+        partition(hpx::id_type id, std::string const& datafilename,
                 dimension const& dim, std::size_t num_nodes)
-          : base_type(interpolate1d::stubs::partition::create_sync(gid))
+          : base_type(hpx::new_<server::partition>(id))
         {
             init(datafilename, dim, num_nodes);
         }
-        partition(hpx::naming::id_type gid)
-          : base_type(gid)
+        explicit partition(hpx::id_type gid)
+          : base_type(std::move(gid))
         {}
 
         // initialize this partition
         hpx::lcos::future<void>
-        init_async(std::string datafilename, dimension const& dim,
+        init_async(std::string const& datafilename, dimension const& dim,
             std::size_t num_nodes)
         {
-            return stubs::partition::init_async(this->gid_, datafilename,
+            typedef server::partition::init_action init_action;
+            return hpx::async(init_action(), this->get_id(), datafilename,
                 dim, num_nodes);
         }
 
-        void init(std::string datafilename, dimension const& dim,
+        void init(std::string const& datafilename, dimension const& dim,
             std::size_t num_nodes)
         {
-            stubs::partition::init(this->gid_, datafilename, dim, num_nodes);
+            init_async(datafilename, dim, num_nodes).get();
         }
 
         // ask this partition to interpolate, note that value must be in the
         // range valid for this partition
         hpx::lcos::future<double>
-        interpolate_async(double value)
+        interpolate_async(double value) const
         {
-            return stubs::partition::interpolate_async(this->gid_, value);
+            typedef server::partition::interpolate_action interpolate_action;
+            return hpx::async(interpolate_action(), this->get_id(), value);
         }
 
-        double interpolate(double value)
+        double interpolate(double value) const
         {
-            return stubs::partition::interpolate(this->gid_, value);
+            return interpolate_async(value).get();
         }
     };
 }
 
-#endif
 
 

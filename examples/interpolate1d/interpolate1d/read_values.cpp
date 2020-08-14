@@ -1,14 +1,16 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2017 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/exception.hpp>
+#include <hpx/hpx.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
 
 #include "read_values.hpp"
-
-#include <boost/assert.hpp>
 
 ///////////////////////////////////////////////////////////////////////////////
 // Interpolation helper functions related to hdf5
@@ -40,7 +42,7 @@ namespace interpolate1d
     }
 
     ///////////////////////////////////////////////////////////////////////////
-    boost::uint64_t extract_data_range (std::string const& datafilename,
+    std::uint64_t extract_data_range (std::string const& datafilename,
         double& minval, double& maxval, double& delta,
         std::size_t start, std::size_t end)
     {
@@ -65,7 +67,7 @@ namespace interpolate1d
 
             // Get the dimension size of each dimension in the dataspace.
             hsize_t dims[1];
-            dataspace.getSimpleExtentDims(dims, NULL);
+            dataspace.getSimpleExtentDims(dims, nullptr);
             if (end == std::size_t(-1))
                 end = dims[0];
 
@@ -108,7 +110,7 @@ namespace interpolate1d
 
             // Get the dimension size of each dimension in the dataspace.
             hsize_t dims[1];
-            dataspace.getSimpleExtentDims(dims, NULL);
+            dataspace.getSimpleExtentDims(dims, nullptr);
 
             read_values(dataset, dataspace, offset, count, values);
         }

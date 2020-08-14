@@ -1,17 +1,20 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_THROTTLE_AUG_09_2011_0659PM)
-#define HPX_THROTTLE_AUG_09_2011_0659PM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/lcos/future.hpp>
+#include <hpx/hpx.hpp>
+#include <hpx/future.hpp>
 #include <hpx/runtime/actions/continuation.hpp>
-#include <hpx/runtime/components/client_base.hpp>
+#include <hpx/include/client.hpp>
 
 #include "stubs/throttle.hpp"
+
+#include <cstddef>
+#include <utility>
 
 namespace throttle
 {
@@ -25,11 +28,11 @@ namespace throttle
     public:
         // create a new partition instance and initialize it synchronously
         throttle()
-          : base_type(stubs::throttle::create_sync(hpx::find_here()))
+          : base_type(stubs::throttle::create(hpx::find_here()))
         {}
 
-        throttle(hpx::naming::id_type gid)
-          : base_type(gid)
+        throttle(hpx::future<hpx::naming::id_type> && gid)
+          : base_type(std::move(gid))
         {}
 
         ~throttle()
@@ -38,14 +41,13 @@ namespace throttle
 
         void suspend(std::size_t thread_num) const
         {
-            return stubs::throttle::suspend(this->get_gid(), thread_num);
+            return stubs::throttle::suspend(this->get_id(), thread_num);
         }
 
         void resume(std::size_t thread_num) const
         {
-            return stubs::throttle::resume(this->get_gid(), thread_num);
+            return stubs::throttle::resume(this->get_id(), thread_num);
         }
     };
 }
 
-#endif

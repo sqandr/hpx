@@ -1,80 +1,118 @@
 # Copyright (c) 2011 Bryce Lelbach
 #
+# SPDX-License-Identifier: BSL-1.0
 # Distributed under the Boost Software License, Version 1.0. (See accompanying
 # file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-set(HPX_MESSAGE_LOADED TRUE)
+function(_to_string var)
+  set(_var "")
 
-macro(hpx_info type)
-  string(TOLOWER ${type} lctype)
-  message("[hpx.info.${lctype}] " ${ARGN})
-endmacro()
+  foreach(_arg ${ARGN})
+    string(REPLACE "\\" "/" _arg ${_arg})
+    if("${_var}" STREQUAL "")
+      set(_var "${_arg}")
+    else()
+      set(_var "${_var} ${_arg}")
+    endif()
+  endforeach()
 
-macro(hpx_debug type)
+  set(${var}
+      ${_var}
+      PARENT_SCOPE
+  )
+endfunction()
+
+function(hpx_info)
+  set(msg)
+  _to_string(msg ${ARGN})
+  message(STATUS "${msg}")
+  unset(args)
+endfunction()
+
+function(hpx_debug)
   if("${HPX_CMAKE_LOGLEVEL}" MATCHES "DEBUG|debug|Debug")
-    string(TOLOWER ${type} lctype)
-    message("[hpx.debug.${lctype}] " ${ARGN})
+    set(msg "DEBUG:")
+    _to_string(msg ${ARGN})
+    message(STATUS "${msg}")
   endif()
-endmacro()
+endfunction()
 
-macro(hpx_warn type)
+function(hpx_warn)
   if("${HPX_CMAKE_LOGLEVEL}" MATCHES "DEBUG|debug|Debug|WARN|warn|Warn")
-    string(TOLOWER ${type} lctype)
-    message("[hpx.warn.${lctype}] " ${ARGN})
+    set(msg "WARNING:")
+    _to_string(msg ${ARGN})
+    message(STATUS "${msg}")
   endif()
-endmacro()
+endfunction()
 
-macro(hpx_error type)
-  string(TOLOWER ${type} lctype)
-  message(FATAL_ERROR "[hpx.error.${lctype}] " ${ARGN})
-endmacro()
+function(hpx_error)
+  set(msg "ERROR:")
+  _to_string(msg ${ARGN})
+  message(FATAL_ERROR "${msg}")
+endfunction()
 
-macro(hpx_message level type)
+function(hpx_message level)
   if("${level}" MATCHES "ERROR|error|Error")
-    string(TOLOWER ${type} lctype)
-    hpx_error(${lctype} ${ARGN})
+    hpx_error(${ARGN})
   elseif("${level}" MATCHES "WARN|warn|Warn")
-    string(TOLOWER ${type} lctype)
-    hpx_warn(${lctype} ${ARGN})
+    hpx_warn(${ARGN})
   elseif("${level}" MATCHES "DEBUG|debug|Debug")
-    string(TOLOWER ${type} lctype)
-    hpx_debug(${lctype} ${ARGN})
+    hpx_debug(${ARGN})
   elseif("${level}" MATCHES "INFO|info|Info")
-    string(TOLOWER ${type} lctype)
-    hpx_info(${lctype} ${ARGN})
+    hpx_info(${ARGN})
   else()
-    hpx_error("message" "\"${level}\" is not an HPX configuration logging level.")
+    hpx_error("message"
+              "\"${level}\" is not an HPX configuration logging level."
+    )
   endif()
-endmacro()
+endfunction()
 
-macro(hpx_config_loglevel level return)
-  set(${return} FALSE)
-  if(    "${HPX_CMAKE_LOGLEVEL}" MATCHES "ERROR|error|Error"
-     AND "${level}" MATCHES "ERROR|error|Error")
-    set(${return} TRUE)
+function(hpx_config_loglevel level return)
+  set(${return}
+      FALSE
+      PARENT_SCOPE
+  )
+  if("${HPX_CMAKE_LOGLEVEL}" MATCHES "ERROR|error|Error"
+     AND "${level}" MATCHES "ERROR|error|Error"
+  )
+    set(${return}
+        TRUE
+        PARENT_SCOPE
+    )
   elseif("${HPX_CMAKE_LOGLEVEL}" MATCHES "WARN|warn|Warn"
-     AND "${level}" MATCHES "WARN|warn|Warn")
-    set(${return} TRUE)
+         AND "${level}" MATCHES "WARN|warn|Warn"
+  )
+    set(${return}
+        TRUE
+        PARENT_SCOPE
+    )
   elseif("${HPX_CMAKE_LOGLEVEL}" MATCHES "DEBUG|debug|Debug"
-     AND "${level}" MATCHES "DEBUG|debug|Debug")
-    set(${return} TRUE)
+         AND "${level}" MATCHES "DEBUG|debug|Debug"
+  )
+    set(${return}
+        TRUE
+        PARENT_SCOPE
+    )
   elseif("${HPX_CMAKE_LOGLEVEL}" MATCHES "INFO|info|Info"
-     AND "${level}" MATCHES "INFO|info|Info")
-    set(${return} TRUE)
+         AND "${level}" MATCHES "INFO|info|Info"
+  )
+    set(${return}
+        TRUE
+        PARENT_SCOPE
+    )
   endif()
-endmacro()
+endfunction()
 
-macro(hpx_print_list level type message list)
+function(hpx_print_list level message list)
   hpx_config_loglevel(${level} printed)
   if(printed)
     if(${list})
-      hpx_message(${level} ${type} "${message}: ")
+      hpx_message(${level} "${message}: ")
       foreach(element ${${list}})
         message("    ${element}")
       endforeach()
     else()
-      hpx_message(${level} ${type} "${message} is empty.")
+      hpx_message(${level} "${message} is empty.")
     endif()
   endif()
-endmacro()
-
+endfunction()

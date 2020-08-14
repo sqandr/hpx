@@ -1,5 +1,6 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2013 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
@@ -11,13 +12,20 @@
 
 #include <hpx/hpx_init.hpp>
 #include <hpx/include/actions.hpp>
-#include <hpx/include/iostreams.hpp>
+#include <hpx/include/parallel_executors.hpp>
+#include <hpx/include/runtime.hpp>
+#include <hpx/iostream.hpp>
+
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace detail
 {
     // this function will be executed by a dedicated OS thread
     void do_async_io(std::string const& string_to_write,
-        boost::shared_ptr<hpx::lcos::local::promise<int> > p)
+        std::shared_ptr<hpx::lcos::local::promise<int> > p)
     {
         // This IO operation will possibly block the IO thread in the
         // kernel.
@@ -29,16 +37,14 @@ namespace detail
     // This function will be executed by an HPX thread
     hpx::lcos::future<int> async_io_worker(std::string const& string_to_write)
     {
-        boost::shared_ptr<hpx::lcos::local::promise<int> > p =
-            boost::make_shared<hpx::lcos::local::promise<int> >();
+        std::shared_ptr<hpx::lcos::local::promise<int> > p =
+            std::make_shared<hpx::lcos::local::promise<int> >();
 
         // Get a reference to one of the IO specific HPX io_service objects ...
-        hpx::util::io_service_pool* pool =
-            hpx::get_runtime().get_thread_pool("io_pool");
+        hpx::parallel::execution::io_pool_executor executor;
 
         // ... and schedule the handler to run on one of its OS-threads.
-        pool->get_io_service().post(
-            hpx::util::bind(&do_async_io, string_to_write, p));
+        hpx::apply(executor, &do_async_io, string_to_write, p);
 
         return p->get_future();
     }
@@ -76,7 +82,7 @@ int hpx_main()
         // wait for it to complete without blocking any of the HPX
         // thread-manager threads. This will suspend the current HPX
         // thread until the IO operation is finished. Other work could
-        // be executed in the mean time.
+        // be executed in the meantime.
         int result = io(id, "Write this string to std::cout");
 
         // Print the returned result.

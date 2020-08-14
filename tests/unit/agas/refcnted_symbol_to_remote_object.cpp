@@ -1,28 +1,31 @@
 //  Copyright (c) 2011 Bryce Adelstein-Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
 #include <hpx/hpx_init.hpp>
-#include <hpx/include/iostreams.hpp>
-#include <hpx/util/lightweight_test.hpp>
-#include <hpx/runtime/applier/applier.hpp>
+#include <hpx/iostream.hpp>
+#include <hpx/modules/testing.hpp>
+#include <hpx/runtime/agas/interface.hpp>
 
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/assign/std/vector.hpp>
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <vector>
 
-#include <tests/unit/agas/components/simple_refcnt_checker.hpp>
-#include <tests/unit/agas/components/managed_refcnt_checker.hpp>
+#include "components/simple_refcnt_checker.hpp"
+#include "components/managed_refcnt_checker.hpp"
 
-using boost::program_options::variables_map;
-using boost::program_options::options_description;
-using boost::program_options::value;
+using hpx::program_options::variables_map;
+using hpx::program_options::options_description;
+using hpx::program_options::value;
 
 using hpx::init;
 using hpx::finalize;
 using hpx::find_here;
 
-using boost::posix_time::milliseconds;
+using std::chrono::milliseconds;
 
 using hpx::naming::id_type;
 using hpx::naming::get_management_type_name;
@@ -53,7 +56,7 @@ void hpx_test_main(
     variables_map& vm
     )
 {
-    boost::uint64_t const delay = vm["delay"].as<boost::uint64_t>();
+    std::uint64_t const delay = vm["delay"].as<std::uint64_t>();
 
     {
         /// AGAS reference-counting test 8 (from #126):
@@ -76,35 +79,45 @@ void hpx_test_main(
 
         Client monitor(remote_localities[0]);
 
-        cout << "id: " << monitor.get_gid() << " "
+        cout << "id: " << monitor.get_id() << " "
              << get_management_type_name
-                    (monitor.get_gid().get_management_type()) << "\n"
+                    (monitor.get_id().get_management_type()) << "\n"
              << flush;
 
+        hpx::naming::gid_type gid;
+
         // Associate a symbolic name with the object.
-        HPX_TEST_EQ(true, register_name(name, monitor.get_gid()));
+        HPX_TEST_EQ(true, register_name(hpx::launch::sync, name, monitor.get_id()));
 
         {
             // Detach the reference.
-            id_type id = monitor.detach();
+            id_type id = monitor.detach().get();
 
             // The component should still be alive.
-            HPX_TEST_EQ(false, monitor.ready(milliseconds(delay)));
+            HPX_TEST_EQ(false, monitor.is_ready(milliseconds(delay)));
+
+            gid = id.get_gid();
+            (void) gid;
+
+            // let id go out of scope
         }
 
         // The component should still be alive, as the symbolic binding holds
         // a reference to it.
-        HPX_TEST_EQ(false, monitor.ready(milliseconds(delay)));
+        HPX_TEST_EQ(false, monitor.is_ready(milliseconds(delay)));
 
         // Remove the symbolic name. This should return the final credits
         // to AGAS.
-        HPX_TEST_EQ(true, unregister_name(name));
+        HPX_TEST_EQ(gid, unregister_name(hpx::launch::sync, name).get_gid());
 
         // Flush pending reference counting operations.
+        garbage_collect(remote_localities[0]);
+        garbage_collect();
+        garbage_collect(remote_localities[0]);
         garbage_collect();
 
         // The component should be destroyed.
-        HPX_TEST_EQ(true, monitor.ready(milliseconds(delay)));
+        HPX_TEST_EQ(true, monitor.is_ready(milliseconds(delay)));
     }
 }
 
@@ -142,15 +155,15 @@ int main(
 
     cmdline.add_options()
         ( "delay"
-        , value<boost::uint64_t>()->default_value(1000)
+        , value<std::uint64_t>()->default_value(1000)
         , "number of milliseconds to wait for object destruction")
         ;
 
     // We need to explicitly enable the test components used by this test.
-    using namespace boost::assign;
-    std::vector<std::string> cfg;
-    cfg += "hpx.components.simple_refcnt_checker.enabled = 1";
-    cfg += "hpx.components.managed_refcnt_checker.enabled = 1";
+    std::vector<std::string> const cfg = {
+        "hpx.components.simple_refcnt_checker.enabled! = 1",
+        "hpx.components.managed_refcnt_checker.enabled! = 1"
+    };
 
     // Initialize and run HPX.
     return init(cmdline, argc, argv, cfg);

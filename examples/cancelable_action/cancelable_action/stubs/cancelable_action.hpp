@@ -1,12 +1,12 @@
 //  Copyright (c) 2007-2012 Hartmut Kaiser
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_EXAMPLE_CANCELABLE_ACTION_STUB_APR_21_2012_1055AM)
-#define HPX_EXAMPLE_CANCELABLE_ACTION_STUB_APR_21_2012_1055AM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
+#include <hpx/hpx.hpp>
 
 #include "../server/cancelable_action.hpp"
 
@@ -40,5 +40,4 @@ namespace examples { namespace stubs
     };
 }}
 
-#endif
 

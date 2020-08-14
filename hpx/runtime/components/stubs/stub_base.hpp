@@ -1,18 +1,38 @@
-//  Copyright (c) 2007-2012 Hartmut Kaiser
+//  Copyright (c) 2007-2015 Hartmut Kaiser
 //  Copyright (c)      2011 Bryce Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
-#if !defined(HPX_COMPONENTS_STUBS_STUB_BASE_CLIENT_OCT_31_2008_0441PM)
-#define HPX_COMPONENTS_STUBS_STUB_BASE_CLIENT_OCT_31_2008_0441PM
+#pragma once
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/components/stubs/runtime_support.hpp>
+#include <hpx/config.hpp>
+#include <hpx/async_distributed/detail/async_colocated_fwd.hpp>
+#include <hpx/async_distributed/detail/async_implementations_fwd.hpp>
+#include <hpx/async_local/async_fwd.hpp>
+#include <hpx/futures/future.hpp>
+#include <hpx/modules/errors.hpp>
+#include <hpx/runtime/components/component_type.hpp>
+#include <hpx/runtime/naming/id_type.hpp>
+#include <hpx/runtime/naming/name.hpp>
+
+#include <cstddef>
+#include <utility>
+#include <vector>
 
 ///////////////////////////////////////////////////////////////////////////////
 namespace hpx { namespace components
 {
+    namespace server
+    {
+        template <typename Component, typename ...Ts>
+        struct create_component_action;
+
+        template <typename Component, typename ...Ts>
+        struct bulk_create_component_action;
+    }
+
     ///////////////////////////////////////////////////////////////////////////
     template <typename ServerComponent>
     struct stub_base
@@ -28,66 +48,98 @@ namespace hpx { namespace components
 
         ///////////////////////////////////////////////////////////////////////
         /// Asynchronously create a new instance of a component
-        static lcos::future<naming::id_type, naming::gid_type>
-        create_async(naming::id_type const& gid,
-            component_type type, std::size_t count = 1)
+        template <typename ...Ts>
+        static lcos::future<naming::id_type>
+        create_async(naming::id_type const& gid, Ts&&... vs)
         {
-            return stubs::runtime_support::create_component_async(
-                gid, type, count);
+            if (!naming::is_locality(gid))
+            {
+                HPX_THROW_EXCEPTION(bad_parameter,
+                    "stubs::runtime_support::create_component_async",
+                    "The id passed as the first argument is not representing"
+                        " a locality");
+                return lcos::make_ready_future(naming::invalid_id);
+            }
+
+            typedef server::create_component_action<
+                ServerComponent, typename hpx::util::decay<Ts>::type...
+            > action_type;
+            return hpx::async<action_type>(gid, std::forward<Ts>(vs)...);
         }
 
-        static lcos::future<naming::id_type, naming::gid_type>
-        create_async(naming::id_type const& gid, std::size_t count = 1)
+        template <typename ...Ts>
+        static lcos::future<std::vector<naming::id_type> >
+        bulk_create_async(naming::id_type const& gid, std::size_t count,
+            Ts&&... vs)
         {
-            return create_async(gid, get_component_type(), count);
+            if (!naming::is_locality(gid))
+            {
+                HPX_THROW_EXCEPTION(bad_parameter,
+                    "stubs::runtime_support::bulk_create_component_async",
+                    "The id passed as the first argument is not representing"
+                        " a locality");
+                return lcos::make_ready_future(std::vector<naming::id_type>());
+            }
+
+            typedef server::bulk_create_component_action<
+                ServerComponent, typename hpx::util::decay<Ts>::type...
+            > action_type;
+            return hpx::async<action_type>(gid, count,
+                std::forward<Ts>(vs)...);
         }
 
-        /// Create a new instance of an simple_accumulator
-        static naming::id_type
-        create_sync(naming::id_type const& gid, component_type type,
-            std::size_t count = 1)
+        template <typename ...Ts>
+        static naming::id_type create(
+            naming::id_type const& gid, Ts&&... vs)
         {
-            return stubs::runtime_support::create_component(gid, type, count);
+            return create_async(gid, std::forward<Ts>(vs)...).get();
         }
 
-        static naming::id_type
-        create_sync(naming::id_type const& gid, std::size_t count = 1)
+        template <typename ...Ts>
+        static std::vector<naming::id_type> bulk_create(
+            naming::id_type const& gid, std::size_t count, Ts&&... vs)
         {
-            return create_sync(gid, get_component_type(), count);
+            return bulk_create_async(gid, count, std::forward<Ts>(vs)...).get();
         }
 
-        ///////////////////////////////////////////////////////////////////////
-        /// Asynchronously create a new instance of a component while passing
-        /// one argument to it's constructor
-        template <typename Arg0>
-        static lcos::future<naming::id_type, naming::gid_type>
-        create_one_async(naming::id_type const& gid, component_type type,
-            BOOST_FWD_REF(Arg0) arg0)
+        template <typename ...Ts>
+        static lcos::future<naming::id_type>
+        create_colocated_async(naming::id_type const& gid, Ts&&... vs)
         {
-            return stubs::runtime_support::create_one_component_async(
-                gid, type, boost::forward<Arg0>(arg0));
+            typedef server::create_component_action<
+                ServerComponent, typename hpx::util::decay<Ts>::type...
+            > action_type;
+            return hpx::detail::async_colocated<action_type>(
+                gid, std::forward<Ts>(vs)...);
         }
 
-        template <typename Arg0>
-        static lcos::future<naming::id_type, naming::gid_type>
-        create_one_async(naming::id_type const& gid, BOOST_FWD_REF(Arg0) arg0)
+        template <typename ...Ts>
+        static naming::id_type create_colocated(
+            naming::id_type const& gid, Ts&&... vs)
         {
-            return create_one_async(gid, get_component_type(), boost::forward<Arg0>(arg0));
+            return create_colocated_async(gid, std::forward<Ts>(vs)...).get();
         }
 
-        template <typename Arg0>
-        static naming::id_type
-        create_one_sync(naming::id_type const& gid, component_type type, BOOST_FWD_REF(Arg0) arg0)
+        template <typename ...Ts>
+        static lcos::future<std::vector<naming::id_type> >
+        bulk_create_colocated_async(naming::id_type const& gid,
+            std::size_t count, Ts&&... vs)
         {
-            return stubs::runtime_support::create_one_component(
-                gid, type, boost::forward<Arg0>(arg0));
+            typedef server::bulk_create_component_action<
+                ServerComponent, typename hpx::util::decay<Ts>::type...
+            > action_type;
+
+            return hpx::detail::async_colocated<action_type>(gid, count,
+                std::forward<Ts>(vs)...);
         }
 
-        template <typename Arg0>
-        static naming::id_type
-        create_one_sync(naming::id_type const& gid, BOOST_FWD_REF(Arg0) arg0)
+        template <typename ...Ts>
+        static std::vector<naming::id_type>
+        bulk_create_colocated(naming::id_type const& id, std::size_t count,
+            Ts&&... vs)
         {
-            return create_one_sync(gid, get_component_type(), boost::forward<Arg0>(arg0));
+            return bulk_create_colocated_async(id, count,
+                std::forward<Ts>(vs)...).get();
         }
 
         /// Delete an existing component
@@ -102,27 +154,7 @@ namespace hpx { namespace components
         {
             gid = naming::invalid_id;
         }
-
-        static void
-        free_sync(component_type type, naming::id_type& gid)
-        {
-            gid = naming::invalid_id;
-        }
-
-        static void
-        free_sync(naming::id_type& gid)
-        {
-            gid = naming::invalid_id;
-        }
     };
-
-    ///////////////////////////////////////////////////////////////////////////
-    namespace stubs
-    {
-          // for backwards compatibility only
-          using components::stub_base;
-    }
 }}
 
-#endif
 

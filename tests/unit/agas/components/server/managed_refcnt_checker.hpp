@@ -1,19 +1,21 @@
 ////////////////////////////////////////////////////////////////////////////////
 //  Copyright (c) 2011 Bryce Adelstein-Lelbach
 //
+//  SPDX-License-Identifier: BSL-1.0
 //  Distributed under the Boost Software License, Version 1.0. (See accompanying
 //  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 ////////////////////////////////////////////////////////////////////////////////
 
-#if !defined(HPX_2F9C9286_A4A2_451C_BBD6_CD884F57B21D)
-#define HPX_2F9C9286_A4A2_451C_BBD6_CD884F57B21D
+#pragma once
 
 #include <vector>
 
-#include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/components/constructor_argument.hpp>
+#include <hpx/hpx.hpp>
+#include <hpx/modules/actions.hpp>
+#include <hpx/modules/actions_base.hpp>
+#include <hpx/runtime/actions/transfer_action.hpp>
+#include <hpx/runtime/actions/transfer_continuation_action.hpp>
 #include <hpx/runtime/components/server/managed_component_base.hpp>
-#include <hpx/runtime/actions/component_action.hpp>
 
 namespace hpx { namespace test { namespace server
 {
@@ -32,9 +34,9 @@ struct HPX_COMPONENT_EXPORT managed_refcnt_checker
     {}
 
     managed_refcnt_checker(
-        components::constructor_argument const& target_
+        naming::id_type const& target
         )
-      : target_(boost::get<naming::id_type>(target_))
+      : target_(target)
       , references_()
     {}
 
@@ -47,28 +49,13 @@ struct HPX_COMPONENT_EXPORT managed_refcnt_checker
         references_.push_back(gid);
     }
 
-    enum actions
-    {
-        action_take_reference
-    };
-
-    typedef hpx::actions::action1<
-        // component
-        managed_refcnt_checker
-        // action code
-      , action_take_reference
-        // arguments
-      , naming::id_type const&
-        // method
-      , &managed_refcnt_checker::take_reference
-    > take_reference_action;
+    HPX_DEFINE_COMPONENT_ACTION(managed_refcnt_checker, take_reference);
 };
 
 }}}
 
-HPX_REGISTER_ACTION_DECLARATION_EX(
+HPX_REGISTER_ACTION_DECLARATION(
     hpx::test::server::managed_refcnt_checker::take_reference_action,
     managed_refcnt_checker_take_reference_action);
 
-#endif // HPX_2F9C9286_A4A2_451C_BBD6_CD884F57B21D
 
